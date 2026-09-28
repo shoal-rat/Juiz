@@ -63,9 +63,11 @@ object Honorifics {
     private val tags = Regex("</?[A-Za-z_][A-Za-z0-9_:-]*[^>]*>")
     /** 小模型偶尔把提示词里的写作要求当成台词说出来，例如"（不超过25字）"。 */
     private val metaNotes = Regex("[（(][^（）()]{0,12}(不超过|以内|字数|\\d+\\s*个?字|简短|口语化)[^（）()]{0,12}[）)]")
+    /** 还会把工具名、参数名放在括号里念出来，例如"（take_message）""（取 callback_requested 信息）"。 */
+    private val toolNotes = Regex("[（(][^（）()]{0,20}[A-Za-z]+_[A-Za-z_]+[^（）()]{0,20}[）)]")
 
     fun strip(text: String, ownerName: String): String {
-        var t = text.replace("**", "").replace(tags, "").replace(metaNotes, "").replace(Regex("\\s{2,}"), " ").trim()
+        var t = text.replace("**", "").replace(tags, "").replace(metaNotes, "").replace(toolNotes, "").replace(Regex("\\s{2,}"), " ").trim()
         if (ownerName.isBlank() || ownerName == "机主") return t
         for (title in titles) {
             t = t.replace(ownerName + title, ownerName)

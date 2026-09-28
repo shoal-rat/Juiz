@@ -153,6 +153,9 @@ class ConversationTest {
         val said = turn(engine, "好的").filterIsInstance<EngineOutput.Speech>().map { it.text }
         assertEquals(listOf("这样关键信息就全了。"), said)
         assertEquals("好的，明天见。", app.juiz.core.conversation.Honorifics.strip("好的，明天见。（口语化，不超过20字）", "林夏"))
+        // 音频测试台实测：工具名和参数名也会被放在括号里念出来
+        assertEquals("需要您回电吗？", app.juiz.core.conversation.Honorifics.strip("（take_message）需要您回电吗？", "林夏"))
+        assertEquals("", app.juiz.core.conversation.Honorifics.strip("（取 callback_requested 信息）", "林夏"))
     }
 
     @Test
