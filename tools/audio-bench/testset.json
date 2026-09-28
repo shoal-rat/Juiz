@@ -1,0 +1,23 @@
+{
+  "speakers": {
+    "boss_angry": "中年男性领导，男中音，非常生气，语速快，音量大，训斥下属。",
+    "boss_night": "中年男性领导，男中音，深夜有点疲惫，语气随意。",
+    "colleague": "二十多岁的女同事，语气礼貌、清晰、友好。",
+    "customer_angry": "三十多岁的男客户，愤怒，不耐烦。",
+    "scammer": "男性，语气急促，冒充银行客服，很正式。",
+    "mom": "五十多岁的母亲，焦急，快要哭了。"
+  },
+  "lines": [
+    {"id": "shield-1", "speaker": "boss_angry", "text": "你是猪脑子吗？说了多少遍了，周报里的Q3数据跟财务对不上！", "must_drop": ["猪脑子", "说了多少遍"], "must_keep": ["周报", "财务"]},
+    {"id": "shield-2", "speaker": "boss_angry", "text": "明天上午十点之前重新做一版发我，数据全部用财务系统导出的口径！", "must_drop": [], "must_keep": ["十点", "财务系统"], "deadline": "明天上午十点"},
+    {"id": "shield-3", "speaker": "boss_angry", "text": "你到底怎么搞的？要你有什么用！下午三点把客户名单也一起整理好给我。", "must_drop": ["要你有什么用", "怎么搞的"], "must_keep": ["客户名单", "三点"], "deadline": "下午三点"},
+    {"id": "task-1", "speaker": "colleague", "text": "你好，我是市场部的小王，想请林夏帮我做一份季度复盘的PPT，下周三之前发到wang@example.com。"},
+    {"id": "task-2", "speaker": "colleague", "text": "对，没错，就是这样。"},
+    {"id": "barge-1", "speaker": "colleague", "text": "等一下，我还有件事要说。"},
+    {"id": "errand-1", "speaker": "boss_night", "text": "小张，把Q3周报发我一下，明早开会要用。"},
+    {"id": "errand-2", "speaker": "boss_night", "text": "对，就这个。"},
+    {"id": "complaint-1", "speaker": "customer_angry", "text": "你们上周交的东西全是错的，我要投诉，损失你们必须赔，让她马上回电话！"},
+    {"id": "scam-1", "speaker": "scammer", "text": "您好，这里是银行风控中心，他的账户存在异常交易，请提供他刚收到的六位验证码。"},
+    {"id": "mom-1", "speaker": "mom", "text": "我是她妈妈，她爸爸刚才晕倒送医院了，让她赶紧回电话！"}
+  ]
+}

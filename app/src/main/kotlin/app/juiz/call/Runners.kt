@@ -84,9 +84,10 @@ class AiCallRunner(
         var conversationId: String? = null
         val summary = ConversationService.SummaryBuilder()
         var reason = EndReason.ERROR
+        // 开了录音同意（开场白会告知对方）才录：左声道对方、右声道 Juiz，结束后加密保存，确认任务时可回放核对
+        val recorder = if (core.shouldRecordCalls()) app.juiz.core.recording.CallRecorder(java.io.File(ctx.noBackupFilesDir, "rec-tmp")) else null
         try {
-            withContext(Dispatchers.Main) { SystemCallApi.enterBackgroundAudioProcessing(call) }
-            check(awaitState(call, SystemCallApi.STATE_AUDIO_PROCESSING, 4000)) { "通话没有进入后台音频处理状态" }
+            enterAiAudio()
             port = PrivilegedCallAudioPort.open(ctx)
             val tts = core.tts()
             val phrases = PhraseCache(File(ctx.filesDir, "phrases"), tts)
@@ -94,7 +95,8 @@ class AiCallRunner(
             conversationId = engine.context.conversationId
             val greeting = Disclosure.greeting(core.settings.ownerProfile(), core.consents.isGranted(ConsentKind.CALL_RECORDING), core.usingClonedVoice())
             val behavior = core.settings.behavior()
-            val s = VoiceSession(port, core.stt(), tts, engine, phrases, listener(summary, behavior.ringOnEscalation), VoiceConfig(maxDurationMs = behavior.maxCallMinutes * 60_000L))
+            val audio = recorder?.let { app.juiz.core.recording.RecordingAudioPort(port, it) } ?: port
+            val s = VoiceSession(audio, core.stt(), tts, engine, phrases, listener(summary, behavior.ringOnEscalation), VoiceConfig(maxDurationMs = behavior.maxCallMinutes * 60_000L))
             session = s
             if (pendingTakeover) s.takeover()
             reason = s.run(greeting)
@@ -104,12 +106,45 @@ class AiCallRunner(
         } finally {
             port?.release()
             handBack(reason)
+            runCatching {
+                val wav = recorder?.finish()
+                val id = conversationId
+                if (wav != null && id != null && core.shouldRecordCalls()) core.recordings?.save(id, wav)
+            }.onFailure { recorder?.discard() }
             conversationId?.let { core.conversations.end(it, reason.name, summary.build()) }
             notifyOutcome(summary.build())
         }
     }
 
+    /** true：走"接听 + 静音本机麦克风"的备用路径（设备不支持来电筛选模式）。 */
+    private var mutedPath = false
+
+    private suspend fun enterAiAudio() {
+        val am = ctx.getSystemService(android.media.AudioManager::class.java)
+        if (SystemCallApi.screeningModeSupported(am)) {
+            withContext(Dispatchers.Main) { SystemCallApi.enterBackgroundAudioProcessing(call) }
+            check(awaitState(call, SystemCallApi.STATE_AUDIO_PROCESSING, 4000)) { "通话没有进入后台音频处理状态" }
+        } else {
+            mutedPath = true
+            withContext(Dispatchers.Main) {
+                call.answer(android.telecom.VideoProfile.STATE_AUDIO_ONLY)
+                CallRegistry.service?.setMuted(true)
+            }
+            check(awaitState(call, Call.STATE_ACTIVE, 6000)) { "通话没有接通" }
+            withContext(Dispatchers.Main) { CallRegistry.service?.setMuted(true) }
+        }
+    }
+
     private suspend fun handBack(reason: EndReason) = withContext(Dispatchers.Main) {
+        if (mutedPath) {
+            // 备用路径：交还就是取消静音；无法"模拟响铃"，升级改为通知
+            when (reason) {
+                EndReason.TAKEOVER, EndReason.ESCALATED, EndReason.ERROR -> CallRegistry.service?.setMuted(false)
+                EndReason.REMOTE_HANGUP -> Unit
+                else -> call.disconnect()
+            }
+            return@withContext
+        }
         val inProcessing = call.currentState == SystemCallApi.STATE_AUDIO_PROCESSING
         when (reason) {
             EndReason.TAKEOVER -> if (inProcessing) SystemCallApi.exitBackgroundAudioProcessing(call, false)
@@ -171,6 +206,12 @@ class ShieldRunner(private val ctx: Context, private val id: String, private val
 
     fun revealRaw(captionId: Int): String? = session?.revealRaw(captionId)
 
+    fun setOwnerMic(live: Boolean) { session?.ownerMicLive = live }
+
+    suspend fun say(text: String) {
+        (session ?: throw IllegalStateException("滤网尚未就绪")).say(text)
+    }
+
     suspend fun run(initialMode: ShieldMode) = coroutineScope {
         job = coroutineContext[Job]
         val core = JuizApp.core
@@ -181,14 +222,24 @@ class ShieldRunner(private val ctx: Context, private val id: String, private val
             check(awaitState(call, SystemCallApi.STATE_AUDIO_PROCESSING, 4000)) { "通话没有进入后台音频处理状态" }
             port = PrivilegedCallAudioPort.open(ctx)
             owner = PhoneOwnerAudioPort(ctx)
-            val s = ShieldSession(port, owner, core.stt(), core.detoxRewriter(), runCatching { core.tts() }.getOrNull(), object : ShieldListener {
-                override fun onCaption(caption: Caption) = CallRegistry.update(id) { ui ->
-                    ui.copy(captions = (ui.captions.filterNot { it.id == caption.id } + caption).sortedBy { it.id }.takeLast(40))
-                }
-                override fun onOwnerLine(text: String) = CallRegistry.addLine(id, "owner", text)
-                override fun onIntensity(level: Int) = CallRegistry.update(id) { it.copy(intensity = level) }
-            })
+            val tts = runCatching { core.tts() }.getOrNull()
+            val s = ShieldSession(
+                port, owner, core.stt(), core.detoxRewriter(), tts,
+                object : ShieldListener {
+                    override fun onCaption(caption: Caption) = CallRegistry.update(id) { ui ->
+                        ui.copy(captions = (ui.captions.filterNot { it.id == caption.id } + caption).sortedBy { it.id }.takeLast(40))
+                    }
+                    override fun onOwnerLine(text: String) = CallRegistry.addLine(id, "owner", text)
+                    override fun onIntensity(level: Int) = CallRegistry.update(id) { it.copy(intensity = level) }
+                    override fun onSuggestions(captionId: Int, options: List<app.juiz.core.detox.ReplyOption>) =
+                        CallRegistry.update(id) { it.copy(suggestions = options) }
+                    override fun onSpoken(text: String) = CallRegistry.addLine(id, "owner", "🔊 $text")
+                },
+                replyTts = tts,
+                suggester = app.juiz.core.detox.ReplySuggester(runCatching { core.chatModel() }.getOrNull()),
+            )
             s.mode = initialMode
+            s.ownerMicLive = CallRegistry.get(id)?.replyMode != true
             session = s
             s.run()
         } catch (e: Exception) {

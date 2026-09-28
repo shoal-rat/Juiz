@@ -36,6 +36,8 @@ class ConversationContext(
     /** 本次会话生效的代办授权（在时段内才有）。 */
     val errandGrant: ErrandGrant? = null,
     val errandFilesEnabled: Boolean = false,
+    /** 机主名字：用于把模型自作主张加上的"先生/女士"去掉，不替机主猜性别。 */
+    val ownerName: String = "",
 ) {
     val errandInfoEnabled: Boolean get() = errandGrant?.notes?.isNotEmpty() == true
     val tools: List<ToolSpec> get() = Tools.forContext(channel, caller.tier, errandFilesEnabled, errandInfoEnabled)
@@ -43,6 +45,10 @@ class ConversationContext(
     val confirmations = ConfirmationTracker()
     val escalation = EscalationDetector(caller)
     var tasksCreated = 0
+    /** 关键信息还没被对方确认、先挂起的任务（对方下一句肯定后由代码自动创建）。 */
+    var pendingTask: JsonObject? = null
+    /** 最近创建的任务签名，防止模型重复调用造成重复任务。 */
+    val createdSignatures = mutableMapOf<String, Task>()
     var messagesTaken = 0
     var callbacksScheduled = 0
     var ended = false
@@ -69,6 +75,8 @@ class ToolExecutor(
     private val owner: () -> OwnerProfile,
     private val errands: ErrandService? = null,
     private val limits: Limits = Limits(),
+    /** 任务创建后的钩子（例如自动交给电脑上的 Codex）。 */
+    private val onTaskCreated: (Task, CallerInfo) -> Unit = { _, _ -> },
 ) {
     data class Limits(val tasksPerConversation: Int = 3, val messagesPerConversation: Int = 3, val callbacksPerConversation: Int = 2)
 
@@ -141,7 +149,7 @@ class ToolExecutor(
             put("urgency", urgency)
         }
         return ToolOutcome(
-            true, ok { put("note", "已记录留言，主人会看到。不要承诺主人何时回复。") },
+            true, ok { put("note", "已记录留言，本人会看到。不要承诺本人何时回复。") },
             listOf(ToolEffect.MessageTaken(summary, a.b("callback_requested"), urgency)),
         )
     }
@@ -151,7 +159,8 @@ class ToolExecutor(
         if (fields.isEmpty()) return ToolOutcome(false, err("没有要确认的字段"))
         ctx.confirmations.registerReadBack(fields)
         return ToolOutcome(true, ok {
-            put("instruction", "现在逐项向对方复述这些信息并询问是否正确。对方明确肯定之前，不要创建任务。")
+            put("instruction", "现在逐项向对方复述这些信息并询问是否正确。对方明确肯定之前，不要创建任务。" +
+                "对方说对之后调用 create_task，字段值要一字不差地沿用：" + fields.entries.joinToString("；") { "${it.key}=${it.value}" })
         })
     }
 
@@ -165,10 +174,23 @@ class ToolExecutor(
         val fields = a.fields("fields").toMutableMap()
         due?.let { fields["截止时间"] = it }
         val deliverable = a.s("deliverable").ifEmpty { null }
+        val brief = a.s("brief").ifEmpty { null }
 
+        val signature = "$title|$request"
+        ctx.createdSignatures[signature]?.let { existing ->
+            return ToolOutcome(true, ok { put("task_id", existing.id); put("note", "这个任务已经创建过了，不要重复创建。") })
+        }
         val problems = ctx.confirmations.violations(fields)
         if (problems.isNotEmpty()) {
-            return ToolOutcome(false, err("关键信息未经确认，任务未创建：" + problems.joinToString("；") + "。请先调用 confirm_details 并向对方复述。"))
+            // 两阶段：先挂起，登记需要复述的值；对方下一句肯定后由引擎自动创建，不依赖模型再调用一次
+            val critical = fields.filter { (_, v) -> ConfirmationTracker.looksCritical(v) }
+            ctx.confirmations.registerReadBack(critical)
+            ctx.pendingTask = a
+            return ToolOutcome(false, err(
+                "关键信息尚未向对方复述确认，任务先挂起：" + problems.joinToString("；") +
+                    "。现在逐项复述这些值并问对方是否正确：" + critical.entries.joinToString("；") { "${it.key}=${it.value}" } +
+                    "。对方确认后任务会自动创建，不需要你再调用 create_task。",
+            ))
         }
         val task = tasks.create(
             NewTask(
@@ -181,18 +203,40 @@ class ToolExecutor(
                 confirmedFields = fields,
                 deliverable = deliverable,
                 due = due,
+                brief = brief,
             ),
         )
         ctx.tasksCreated++
+        ctx.createdSignatures[signature] = task
+        ctx.pendingTask = null
+        runCatching { onTaskCreated(task, ctx.caller) }
         return ToolOutcome(
             true,
             ok {
                 put("task_id", task.id)
                 put("status", task.status.zh)
-                put("instruction", "告诉对方已经记下，需要主人确认后才会办理；不要承诺完成时间或结果。")
+                put("instruction", "告诉对方已经记下，需要本人确认后才会办理；不要承诺完成时间或结果。")
             },
             listOf(ToolEffect.TaskCreated(task)),
         )
+    }
+
+    /** 记录一次被拦下的"谎报完成"。 */
+    fun recordBlockedClaim(ctx: ConversationContext, sentence: String) {
+        archive.append("guard.claim_blocked", ctx.conversationId) { put("sentence", sentence.take(200)) }
+    }
+
+    /** 记录一次补登记任务的结果（created / no_call / rejected / error），方便事后排查小模型漏调工具。 */
+    fun recordRescue(ctx: ConversationContext, result: String) {
+        archive.append("guard.task_rescue", ctx.conversationId) { put("result", result.take(200)) }
+    }
+
+    /** 对方肯定了复述内容：把挂起的任务真正创建出来。 */
+    suspend fun commitPending(ctx: ConversationContext): Pair<ChatItem.ToolCall, ToolOutcome>? {
+        val args = ctx.pendingTask ?: return null
+        ctx.pendingTask = null
+        val call = ChatItem.ToolCall("auto_${ctx.tasksCreated + 1}", Tools.CREATE_TASK, args.toString())
+        return call to execute(call, ctx)
     }
 
     private fun checkStatus(ctx: ConversationContext): ToolOutcome {
@@ -214,12 +258,12 @@ class ToolExecutor(
 
     /** 对来电方描述状态时，"Work 说完成了"只能说成"结果正在核对"。 */
     private fun describeForCaller(s: TaskStatus): String = when (s) {
-        TaskStatus.PENDING_CONFIRMATION -> "已记录，等待主人确认"
+        TaskStatus.PENDING_CONFIRMATION -> "已记录，等待本人确认"
         TaskStatus.HANDED_OFF, TaskStatus.IN_PROGRESS -> "正在处理"
-        TaskStatus.AWAITING_APPROVAL -> "等待主人审批"
-        TaskStatus.NEEDS_VERIFICATION -> "处理结果正在由主人核对，尚未确认完成"
+        TaskStatus.AWAITING_APPROVAL -> "等待本人审批"
+        TaskStatus.NEEDS_VERIFICATION -> "处理结果正在由本人核对，尚未确认完成"
         TaskStatus.COMPLETED -> "已完成（已核实）"
-        TaskStatus.FAILED -> "处理遇到问题，主人会跟进"
+        TaskStatus.FAILED -> "处理遇到问题，本人会跟进"
         TaskStatus.CANCELLED -> "已取消"
     }
 
@@ -242,21 +286,21 @@ class ToolExecutor(
         ctx.callbacksScheduled++
         return ToolOutcome(true, ok {
             put("task_id", task.id)
-            put("instruction", "告诉对方已登记回电请求，主人会尽量安排；不要承诺具体回电时间。")
+            put("instruction", "告诉对方已登记回电请求，本人会尽量安排；不要承诺具体回电时间。")
         }, listOf(ToolEffect.TaskCreated(task)))
     }
 
     private fun escalate(a: JsonObject, ctx: ConversationContext): ToolOutcome {
         val signals = ctx.escalation.modelRequested(a.s("reason").ifEmpty { "助理判断需要本人" }, a.s("urgency") == "urgent")
         return ToolOutcome(true, ok {
-            put("instruction", "已通知主人。告诉对方正在联系本人，请对方稍候；如果主人未接，改为留言。")
+            put("instruction", "已通知本人。告诉对方正在联系本人，请对方稍候；如果本人未接，改为留言。")
         }, listOf(ToolEffect.Escalate(signals)))
     }
 
     private fun availability(): ToolOutcome {
         val status = owner().publicStatus
         return ToolOutcome(true, ok {
-            put("status", status.ifEmpty { "主人没有设置可对外说明的状态。只能说他现在不方便接听。" })
+            put("status", status.ifEmpty { "本人没有设置可对外说明的状态。只能说本人现在不方便接听。" })
         })
     }
 
@@ -264,7 +308,7 @@ class ToolExecutor(
         val fact = a.s("fact").ifEmpty { return ToolOutcome(false, err("内容不能为空")) }
         val subject = a.s("subject").ifEmpty { ctx.caller.label }
         memory.add(subject, fact, FactSource.CALLER, "${ctx.conversationId}|${ctx.caller.number}")
-        return ToolOutcome(true, ok { put("note", "已记录为待主人确认的信息。") })
+        return ToolOutcome(true, ok { put("note", "已记录为待本人确认的信息。") })
     }
 
     private fun markSpam(a: JsonObject, ctx: ConversationContext): ToolOutcome {

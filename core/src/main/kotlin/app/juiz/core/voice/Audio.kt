@@ -1,5 +1,6 @@
 package app.juiz.core.voice
 
+import kotlinx.coroutines.launch
 import kotlin.math.max
 import kotlin.math.sqrt
 
@@ -88,11 +89,13 @@ data class VadConfig(
 enum class VadEvent { SPEECH_START, SPEECH_END }
 
 /**
- * 能量 VAD：自适应噪声底 + 起止挂起时间。刻意简单、可解释，参数在真机验证时按线路调整。
+ * 能量 VAD：噪声底用"最小值统计"估计（最近 1.5 秒里较安静的那部分帧），
+ * 说话里的轻音节不会把噪声底越抬越高（滑动平均会这样，门限随之上涨，最后整句话都判成安静）。
  * strict=true（AI 正在说话）时需要更高能量和更长时间才判定为对方开口，即"打断"。
  */
 class EnergyVad(private val rate: Int, private val cfg: VadConfig = VadConfig()) {
-    private var noiseFloor = 150.0
+    private val window = ArrayDeque<Double>()
+    private var windowMs = 0L
     private var voicedMs = 0L
     private var silentMs = 0L
     var inSpeech = false
@@ -106,15 +109,24 @@ class EnergyVad(private val rate: Int, private val cfg: VadConfig = VadConfig())
 
     val lastWasMeaningful: Boolean get() = lastUtteranceMs >= cfg.minUtteranceMs
 
+    val noiseFloor: Double
+        get() {
+            if (window.isEmpty()) return 150.0
+            val sorted = window.sorted()
+            return maxOf(30.0, sorted[sorted.size / 10])
+        }
+
     fun process(frame: ShortArray, strict: Boolean = false): VadEvent? {
         val ms = Pcm.durationMs(frame.size, rate)
         val r = Pcm.rms(frame)
+        window.addLast(r)
+        windowMs += ms
+        while (windowMs > 1500 && window.size > 1) {
+            window.removeFirst()
+            windowMs -= ms
+        }
         val ratio = if (strict) cfg.bargeInRatio else cfg.speechRatio
         val voiced = r >= max(cfg.minSpeechRms, noiseFloor * ratio)
-        if (!voiced && !inSpeech) {
-            // 只在非说话段更新噪声底，慢速跟随
-            noiseFloor = noiseFloor * 0.95 + r * 0.05
-        }
         if (!inSpeech) {
             voicedMs = if (voiced) voicedMs + ms else 0
             val need = if (strict) cfg.bargeInMs else cfg.startMs
@@ -146,6 +158,24 @@ class EnergyVad(private val rate: Int, private val cfg: VadConfig = VadConfig())
     }
 }
 
+/**
+ * 慢速自动增益：电话下行音量忽高忽低，太轻的来电方既难断句也难转写。
+ * 只在判定为有声的帧上跟踪响度，增益平滑变化、有上限；结果只送去断句和转写，不改变本人听到的原声。
+ */
+class Agc(private val targetRms: Double = 2500.0, private val maxGain: Double = 8.0) {
+    private var level = targetRms
+    var gain = 1.0
+        private set
+
+    fun process(frame: ShortArray): ShortArray {
+        val r = Pcm.rms(frame)
+        if (r > 250) level = level * 0.96 + r * 0.04
+        val want = (targetRms / maxOf(level, 1.0)).coerceIn(0.5, maxGain)
+        gain = gain * 0.9 + want * 0.1
+        return ShortArray(frame.size) { (frame[it] * gain).toInt().coerceIn(-32768, 32767).toShort() }
+    }
+}
+
 /** 保留最近一段音频，说话起点判定有延迟，把开头补给转写。 */
 class PreRoll(private val maxSamples: Int) {
     private val frames = ArrayDeque<ShortArray>()
@@ -158,4 +188,62 @@ class PreRoll(private val maxSamples: Int) {
     }
 
     fun drain(): List<ShortArray> = frames.toList().also { frames.clear(); size = 0 }
+}
+
+/**
+ * 把被自然停顿切开的片段拼回一句话再交给引擎：
+ * 说完一段后等一个很短的"宽限期"，这期间对方又开口就继续拼；宽限期按文字长短与结尾标点自适应。
+ */
+class UtteranceJoiner(
+    private val scope: kotlinx.coroutines.CoroutineScope,
+    private val isCallerSpeaking: () -> Boolean,
+    private val deliver: suspend (text: String, lastEndedAt: Long) -> Unit,
+) {
+    private val parts = mutableListOf<String>()
+    private var job: kotlinx.coroutines.Job? = null
+    private var lastEnd = 0L
+
+    /** 对方又开口了：先别交付。 */
+    @Synchronized fun callerResumed() {
+        job?.cancel()
+        job = null
+    }
+
+    @Synchronized fun add(text: String, endedAt: Long) {
+        if (text.isNotBlank()) parts += text.trim()
+        lastEnd = maxOf(lastEnd, endedAt)
+        schedule()
+    }
+
+    /** 一段太短、被丢弃的声音之后，恢复等待交付已有的片段。 */
+    @Synchronized fun resume() = schedule()
+
+    private fun schedule() {
+        job?.cancel()
+        if (parts.isEmpty() || isCallerSpeaking()) return
+        val grace = graceFor(parts.joinToString(""))
+        job = scope.launch {
+            kotlinx.coroutines.delay(grace)
+            val (text, ended) = take() ?: return@launch
+            deliver(text, ended)
+        }
+    }
+
+    @Synchronized private fun take(): Pair<String, Long>? {
+        if (parts.isEmpty() || isCallerSpeaking()) return null
+        val t = parts.joinToString("")
+        parts.clear()
+        return t to lastEnd
+    }
+
+    companion object {
+        fun graceFor(t: String): Long {
+            val last = t.trimEnd().lastOrNull() ?: return 600
+            return when {
+                t.length >= 6 && last in "。！？!?." -> 350
+                last in "，,、：:" || t.length < 6 -> 900
+                else -> 600
+            }
+        }
+    }
 }

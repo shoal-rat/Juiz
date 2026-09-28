@@ -55,12 +55,12 @@ object SmsScreening {
             if (personal && !canSend(ctx)) call.reject(true, greeting) else call.reject(false, null)
         }
         if (!personal) return
-        if (canSend(ctx)) send(ctx, caller.number, greeting)
         val engine = core.conversations.start(caller, Channel.SMS, "L0-sms", runCatching { core.chatModel() }.getOrElse { return })
         engine.opening(greeting)
         val hours = core.settings.behavior().smsSessionHours
         val now = core.clock.millis()
         core.db.juizQueries.upsertSmsSession(normalizeNumber(caller.number), engine.context.conversationId, now, now + hours * 3_600_000L)
+        if (canSend(ctx)) runCatching { send(ctx, caller.number, greeting) }
         core.archive.append("sms.sent", engine.context.conversationId) {
             put("to", caller.number)
             put("kind", "greeting")

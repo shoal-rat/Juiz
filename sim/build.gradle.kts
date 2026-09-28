@@ -27,6 +27,7 @@ tasks.named<JavaExec>("run") {
 
 dependencies {
     implementation(project(":core"))
+    implementation(project(":desk"))
     implementation(libs.sqldelight.sqlite.driver)
     testImplementation(libs.kotlin.test)
     testImplementation(libs.junit)

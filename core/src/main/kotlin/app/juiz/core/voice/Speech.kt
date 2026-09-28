@@ -15,8 +15,11 @@ interface SttSession {
     val sampleRate: Int
     val partials: SharedFlow<String>
     fun append(pcm: ShortArray)
-    /** 提交当前缓冲并等待这段话的最终转写。 */
-    suspend fun commit(timeoutMs: Long = 4000): String
+    /**
+     * 在当前位置立即封口并提交（必须在判定"说完"的那一刻同步调用：之后追加的音频属于下一段，
+     * 否则对方紧接着开口时，下一段的开头会被并进这一段，一句话被从中间切断）。返回这一段的最终转写。
+     */
+    fun commit(): kotlinx.coroutines.Deferred<String>
     /** 丢弃当前缓冲（咳嗽、噪声等太短的片段）。 */
     fun clear()
     fun close()

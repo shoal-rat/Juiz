@@ -55,6 +55,9 @@ object LexiconFilter {
             "(之前|以前|前|下班前|为止)?",
     )
 
+    /** 只有时间没有日期的期限，例如"下午三点""十点之前"。 */
+    private val timeOnlyRe = Regex("(上午|下午|晚上|早上|中午|凌晨)?[零一二两三四五六七八九十\\d]{1,3}[点:：]([半一二三四五六七八九十\\d]{0,3}分?)?(之前|以前|前)?")
+
     private val clauseSplit = Regex("(?<=[，。！？!?,；;\\n])")
 
     /**
@@ -87,13 +90,15 @@ object LexiconFilter {
             else -> 0
         }
         return DetoxLine(
-            calm = calm.ifEmpty { "（这句只有情绪表达，没有具体内容）" },
-            deadline = deadlineRe.find(text)?.value,
+            calm = calm.ifEmpty { EMOTION_ONLY },
+            deadline = deadlineRe.find(text)?.value ?: timeOnlyRe.find(text)?.value,
             intensity = intensity,
             filteredCount = count,
         )
     }
 }
+
+const val EMOTION_ONLY = "（这句只有情绪表达，没有具体内容）"
 
 /** 用模型把一句话改写成平静版本，并抽出要求、期限和不满的原因。失败时退回词表结果。 */
 class DetoxRewriter(private val model: ChatModel) {
@@ -101,6 +106,7 @@ class DetoxRewriter(private val model: ChatModel) {
         你是一个"情绪滤网"。输入是电话里对方说的一句话，读者是接电话的本人。
         任务：去掉其中的辱骂、贬损、讽刺、情绪宣泄和重复，只保留事实与要求，用平静、中性的第二人称转述。
         不要评价对方，不要安慰，不要添加原话里没有的内容；原话里的要求一条都不能漏，数字、时间、名称照原样保留。
+        如果原话只有情绪、没有任何事实或要求，calm 填空字符串。
         只输出一个 JSON 对象，不要任何其他文字：
         {"calm":"平静转述","requests":["具体要求"],"deadline":"期限或null","concern":"对方不满的事实原因或null","intensity":0到3的整数}
         intensity：0 平静，1 不耐烦，2 明显生气，3 辱骂或人身攻击。
@@ -111,7 +117,10 @@ class DetoxRewriter(private val model: ChatModel) {
         return try {
             val raw = collect(model, system, "原话：$text")
             val parsed = JuizJson.decodeFromString(DetoxLine.serializer(), extractJson(raw))
-            parsed.copy(filteredCount = fallback.filteredCount, intensity = maxOf(parsed.intensity, fallback.intensity))
+            val modelCalm = parsed.calm.trim().takeUnless { it.isEmpty() || it.startsWith("无") && ("要求" in it || "内容" in it || "信息" in it) }
+            // 词表过滤后还留有实在内容（事实/要求）时，模型不能把整句判成"只有情绪"
+            val calm = modelCalm ?: if (fallback.calm != EMOTION_ONLY && fallback.calm.length >= 6) fallback.calm else EMOTION_ONLY
+            parsed.copy(calm = calm, deadline = parsed.deadline?.takeIf { it.isNotBlank() && it != "null" } ?: fallback.deadline, filteredCount = fallback.filteredCount, intensity = maxOf(parsed.intensity, fallback.intensity))
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {

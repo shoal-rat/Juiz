@@ -36,6 +36,11 @@ private fun usage(): Nothing {
           eval     运行场景评测集 --model …（scripted 只检验代码层规则）
           detox    去情绪过滤一句话："<原话>" [--model …]
           digest   对转写文件生成去情绪摘要 <file>，每行"对方：…"或"本人：…"
+          pipeline 真实链路：小模型接活并写工作说明 → 交换目录 → juiz-desk 调 Codex 干活 → 核验 → 草稿待本人批准
+                   --model compat|openai  [--codex-model gpt-6-sol] [--approve]
+          audio-bench  通话音频测试台：AI 生成的领导/同事语音 → 电话音质 → 真实语音链路（需先启动 tools/audio-bench/server.py）
+                   --model compat|openai
+          buddy    试听伙伴 Juiz 在不同情境下的台词（需要 --model openai|compat）
           demo     离线演示完整闭环（来电决策 → 对话 → 任务 → 交接 → 核验 → 深夜代办 → 档案导出）
         """.trimIndent(),
     )
@@ -52,6 +57,10 @@ fun main(argv: Array<String>) {
             "detox" -> detox(args)
             "digest" -> digest(args)
             "demo" -> Demo.run()
+            "buddy" -> buddy(args)
+            "pipeline" -> Pipeline.run(args)
+            "audio-bench" -> AudioBench.run(args)
+            "vad-debug" -> AudioBench.vadDebug(args)
             else -> usage()
         }
     }
@@ -62,7 +71,7 @@ fun printOutput(o: EngineOutput) {
     when (o) {
         is EngineOutput.Speech -> Unit
         is EngineOutput.ToolActivity -> println(Ansi.dim("    ⚙ ${o.name} ${if (o.ok) "✓" else "✗"} ${o.output.take(160)}"))
-        is EngineOutput.Escalation -> println(Ansi.amber("    ⚑ 通知主人：${o.signal.reason.zh}（${o.signal.detail}）"))
+        is EngineOutput.Escalation -> println(Ansi.amber("    ⚑ 通知本人：${o.signal.reason.zh}（${o.signal.detail}）"))
         is EngineOutput.TaskCreated -> println(Ansi.green("    ＋ 任务 ${o.task.id}「${o.task.title}」${o.task.status.zh}"))
         is EngineOutput.MessageTaken -> println(Ansi.green("    ✉ 留言：${o.summary}"))
         is EngineOutput.SpamMarked -> println(Ansi.amber("    ⊘ 标记骚扰：${o.reason}"))
@@ -119,6 +128,30 @@ private suspend fun chat(args: Args) {
     }
     core.conversations.end(engine.context.conversationId, "sim-ended", summary.build())
     println(Ansi.dim("会话结束 · 摘要：${summary.build() ?: "（无）"} · 档案：${core.archive.verify().message}"))
+}
+
+private suspend fun buddy(args: Args) {
+    val brain = app.juiz.core.buddy.BuddyBrain(SimEnv.model(args.modelChoice()), timeoutMs = 60_000)
+    val cases = listOf(
+        app.juiz.core.buddy.BuddyEvent.OPEN_APP to app.juiz.core.buddy.BuddyFacts(hour = 8, ownerName = "林夏", pendingTasks = 2),
+        app.juiz.core.buddy.BuddyEvent.TAP to app.juiz.core.buddy.BuddyFacts(hour = 8, ownerName = "林夏", pendingTasks = 2),
+        app.juiz.core.buddy.BuddyEvent.OPEN_APP to app.juiz.core.buddy.BuddyFacts(hour = 7, errandsLastNight = 1),
+        app.juiz.core.buddy.BuddyEvent.LONG_PRESS to app.juiz.core.buddy.BuddyFacts(hour = 15),
+        app.juiz.core.buddy.BuddyEvent.OPEN_APP to app.juiz.core.buddy.BuddyFacts(hour = 16, recentDigest = true),
+        app.juiz.core.buddy.BuddyEvent.OPEN_APP to app.juiz.core.buddy.BuddyFacts(hour = 2),
+        app.juiz.core.buddy.BuddyEvent.CHAT to app.juiz.core.buddy.BuddyFacts(hour = 21),
+        app.juiz.core.buddy.BuddyEvent.TAP to app.juiz.core.buddy.BuddyFacts(hour = 10, addressAs = "队长"),
+    )
+    val chats = listOf("今天被领导骂了，好累", "你是谁呀")
+    var chatIdx = 0
+    for ((ev, facts) in cases + listOf(app.juiz.core.buddy.BuddyEvent.CHAT to app.juiz.core.buddy.BuddyFacts(hour = 21))) {
+        val text = if (ev == app.juiz.core.buddy.BuddyEvent.CHAT) chats[chatIdx++ % chats.size] else null
+        val t = System.currentTimeMillis()
+        val say = brain.react(ev, facts, text)
+        println(Ansi.dim("${ev.zh}${text?.let { "「$it」" } ?: ""} · ${brain.situation(facts)}"))
+        println("  ${say?.mood ?: "（回退预设）"} ▸ ${say?.text ?: "-"}  " + Ansi.dim("${System.currentTimeMillis() - t}ms"))
+        if (say == null) println(Ansi.dim("    raw: ${brain.lastRaw?.take(200)}"))
+    }
 }
 
 private suspend fun detox(args: Args) {

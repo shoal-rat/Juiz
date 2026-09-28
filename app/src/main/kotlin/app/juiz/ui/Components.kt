@@ -312,7 +312,7 @@ fun HexBarrier(active: Boolean, color: Color, modifier: Modifier = Modifier) {
     }
 }
 
-/** 小彩蛋：从屏幕底边探出头的 Juiz，说一句话就缩回去。 */
+/** 从屏幕底边探出头的 Juiz，说一句话就缩回去。 */
 @Composable
 fun MascotPeek(visible: Boolean, line: String, modifier: Modifier = Modifier) {
     AnimatedVisibility(

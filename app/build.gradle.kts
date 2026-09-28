@@ -21,7 +21,9 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             // 发布包不内置任何供应商密钥；个人自用版由主人在应用内填写
             signingConfig = signingConfigs.getByName("debug")
         }
@@ -65,6 +67,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.service)
     implementation(libs.androidx.work)
     implementation(libs.androidx.biometric)
+    implementation(libs.androidx.fragment)
     implementation(libs.androidx.documentfile)
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)

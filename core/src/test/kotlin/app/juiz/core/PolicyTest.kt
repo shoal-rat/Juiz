@@ -104,4 +104,22 @@ class PolicyTest {
         assertTrue("AI" in g && "录音" in g && "合成声音" in g, g)
         assertTrue(g.indexOf("录音") < g.indexOf("请问"))
     }
+
+    @Test
+    fun plainTextReadBackIsRegistered() {
+        val c = ConfirmationTracker()
+        c.observeAssistantUtterance("收到，我先记录您的要求。截止时间是明早十点对吧？邮件地址wang@example.com对吗？")
+        assertEquals(mapOf("邮箱" to "wang@example.com", "时间" to "明早十点"), c.pendingFields)
+        assertEquals(ConfirmationTracker.Outcome.CONFIRMED, c.observeCallerUtterance("对，都没问题"))
+        assertTrue(c.violations(mapOf("截止时间" to "明早十点", "邮箱" to "wang@example.com")).isEmpty())
+        // 实测里模型的说法五花八门："是这样吗？""信息准确无误？"
+        val e = ConfirmationTracker()
+        e.observeAssistantUtterance("您需要一份 Q3 方案，下午六点前发到 li@example.com。是这样吗？")
+        assertEquals(mapOf("邮箱" to "li@example.com", "时间" to "下午六点"), e.pendingFields)
+        // 不是发问就不登记
+        val d = ConfirmationTracker()
+        d.observeAssistantUtterance("好的，明早十点前我会转告本人。")
+        assertTrue(d.pendingFields.isEmpty())
+        assertEquals(mapOf("电话" to "13800138000", "金额" to "3000元"), ConfirmationTracker.extractCritical("回电号码 13800138000，金额 3000元，对吗？"))
+    }
 }

@@ -1,0 +1,6 @@
+id=juiz_privileged
+name=Juiz Privileged (L1 voice)
+version=1.0.39
+versionCode=1
+author=Juiz contributors
+description=把 Juiz 安装为系统特权应用以尝试 L1 语音代接。仅供自己的设备实验，风险自担；需再用应用内的真机验证向导确认。

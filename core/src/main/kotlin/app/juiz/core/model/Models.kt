@@ -83,6 +83,7 @@ data class Task(
     val resultSummary: String?,
     val verification: String?,
     val note: String?,
+    val brief: String? = null,
 ) {
     val handoffKey: String get() = "$id#$handoffAttempt"
 }
@@ -142,7 +143,10 @@ data class ConsentRecord(val kind: ConsentKind, val granted: Boolean, val scope:
 
 @Serializable
 data class OwnerProfile(
-    val ownerName: String = "主人",
+    /** 对来电方介绍时用的名字（"我是{owner}的 AI 助理"）。 */
+    val ownerName: String = "机主",
+    /** Juiz 在应用里怎么称呼你，默认"伙伴"，可以在设置里改。 */
+    val addressAs: String = "伙伴",
     val assistantName: String = "Juiz",
     /** 开场白模板，{owner} {assistant} 会被替换。必须包含 AI 身份披露。 */
     val greetingTemplate: String = "您好，我是{owner}的 AI 助理 {assistant}，经本人授权代接电话。请问有什么可以帮您？",

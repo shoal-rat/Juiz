@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 让 Juiz 作为系统特权应用获得通话音频拦截所需的权限（L1）。
+     注意：系统强制校验特权权限白名单，清单里请求的每个特权权限都必须列在这里，否则可能无法开机。 -->
+<permissions>
+    <privapp-permissions package="app.juiz">
+        <permission name="android.permission.CALL_AUDIO_INTERCEPTION" />
+        <permission name="android.permission.CAPTURE_AUDIO_OUTPUT" />
+        <permission name="android.permission.MODIFY_PHONE_STATE" />
+    </privapp-permissions>
+</permissions>

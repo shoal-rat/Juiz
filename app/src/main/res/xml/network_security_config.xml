@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 供应商接口（OpenAI、ElevenLabs、Workspace Agents）都是写死的 https。
+     允许明文只是为了连接主人自己局域网里的模型（例如 http://192.168.x.x:11434/v1 的 ollama）。 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

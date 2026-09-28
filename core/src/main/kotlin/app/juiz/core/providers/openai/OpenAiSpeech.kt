@@ -173,12 +173,12 @@ class OpenAiRealtimeStt(
             ws.send("""{"type":"input_audio_buffer.append","audio":"$b64"}""")
         }
 
-        override suspend fun commit(timeoutMs: Long): String {
-            failure?.let { throw it }
+        override fun commit(): kotlinx.coroutines.Deferred<String> {
             val d = CompletableDeferred<String>()
+            failure?.let { d.completeExceptionally(it); return d }
             waiting.add(d)
             ws.send("""{"type":"input_audio_buffer.commit"}""")
-            return withTimeout(timeoutMs) { d.await() }
+            return d
         }
 
         override fun clear() {

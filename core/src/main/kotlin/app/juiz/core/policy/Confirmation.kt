@@ -17,6 +17,16 @@ class ConfirmationTracker {
         pending = fields.mapValues { normalize(it.value) }
     }
 
+    /**
+     * 小模型常常不调用 confirm_details，而是直接在话里复述并发问（"截止时间是明早十点对吧？邮箱是……对吗？"）。
+     * 这种复述也要登记：从这句话里抽出关键值，对方下一句肯定时照样算确认。
+     */
+    fun observeAssistantUtterance(text: String) {
+        if (pending.isNotEmpty() || !asksConfirmation.containsMatchIn(text)) return
+        val found = extractCritical(text)
+        if (found.isNotEmpty()) pending = found
+    }
+
     enum class Outcome { NONE_PENDING, CONFIRMED, REJECTED, UNCLEAR }
 
     fun observeCallerUtterance(text: String): Outcome {
@@ -75,5 +85,36 @@ class ConfirmationTracker {
             digit.containsMatchIn(value) || '@' in value || chineseNumber.containsMatchIn(value)
 
         fun normalize(v: String): String = v.trim().replace(Regex("\\s+"), " ")
+
+        // 必须同时含关键值（邮箱、电话、时间、金额）才会登记，所以这里可以放宽
+        private val asksConfirmation = Regex("(对吗|对吧|是吗|是这样吗|正确吗|准确吗|无误吗|是否正确|是否准确|没错吧|对不对|是不是|确认一下|请确认|请您确认|核对一下|吗[？?])")
+        private val emailRe = Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}")
+        private val phoneRe = Regex("(?<!\\d)(1\\d{10}|0\\d{2,3}-?\\d{7,8})(?!\\d)")
+        private const val NUM = "[零〇一二两三四五六七八九十\\d]"
+        private val timeRe = Regex(
+            "((今|明|后)(天|早|晚)?|周[一二三四五六日天]|星期[一二三四五六日天]|$NUM{1,2}月$NUM{1,3}[日号])?" +
+                "(早上|上午|中午|下午|傍晚|晚上)?$NUM{1,3}(点|:|：)($NUM{1,2}分?|半|整)?",
+        )
+        private val dateRe = Regex("$NUM{1,2}月$NUM{1,3}[日号]")
+        private val moneyRe = Regex("(\\d[\\d,.]*|[零〇一二两三四五六七八九十百千万]+)\\s*(元|块|万元|万)")
+
+        /** 从一句复述里抽出关键值：邮箱、电话、时间（或日期）、金额。 */
+        fun extractCritical(text: String): Map<String, String> {
+            val out = linkedMapOf<String, String>()
+            fun add(name: String, v: String) {
+                var key = name; var i = 2
+                while (key in out) key = name + i++
+                out[key] = normalize(v)
+            }
+            emailRe.findAll(text).forEach { add("邮箱", it.value) }
+            val rest = emailRe.replace(text, " ")
+            phoneRe.findAll(rest).forEach { add("电话", it.value) }
+            val noPhone = phoneRe.replace(rest, " ")
+            val times = timeRe.findAll(noPhone).map { it.value }.filter { it.length >= 2 }.toList()
+            times.forEach { add("时间", it) }
+            if (times.isEmpty()) dateRe.findAll(noPhone).forEach { add("日期", it.value) }
+            moneyRe.findAll(noPhone).forEach { add("金额", it.value) }
+            return out
+        }
     }
 }

@@ -42,6 +42,7 @@ import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Sms
 import androidx.compose.material.icons.outlined.SupportAgent
 import androidx.compose.material.icons.automirrored.outlined.VolumeUp
+import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.PanTool
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -74,9 +75,21 @@ import app.juiz.ui.theme.JuizTheme
 import kotlinx.coroutines.delay
 
 class InCallActivity : ComponentActivity() {
+    override fun onResume() {
+        super.onResume()
+        CallRegistry.screenVisible = true
+        runCatching { CallController.refreshAll() }
+    }
+
+    override fun onPause() {
+        CallRegistry.screenVisible = false
+        runCatching { CallController.refreshAll() }
+        super.onPause()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT), androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
         setContent {
             JuizTheme {
                 val calls by CallRegistry.calls.collectAsState()
@@ -148,6 +161,7 @@ private fun InCallScreen(ui: CallUi) {
                 }
             }
 
+            if (shield) ReplyPicker(ui)
             if (shield) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 12.dp)) {
                     ShieldMode.entries.forEach { m ->
@@ -195,12 +209,67 @@ private fun InCallScreen(ui: CallUi) {
     }
 }
 
+/** 选句代答：本人不开口，从 Juiz 准备的回复里选一句或自己输入，由合成声音说给对方。 */
+@Composable
+private fun ReplyPicker(ui: CallUi) {
+    val c = J.c
+    var draft by remember { mutableStateOf("") }
+    Column(Modifier.fillMaxWidth().padding(bottom = 10.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            listOf(false to "我自己说", true to "选句代答").forEach { (mode, label) ->
+                val on = ui.replyMode == mode
+                Box(
+                    Modifier.clip(RoundedCornerShape(50)).background(if (on) c.sora.copy(alpha = 0.18f) else c.surface)
+                        .clickable { CallController.setReplyMode(ui.id, mode) }.padding(horizontal = 12.dp, vertical = 7.dp),
+                ) { Text(label, color = if (on) c.sora else c.sub, fontSize = 12.sp) }
+            }
+            Spacer(Modifier.weight(1f))
+            if (ui.speaking) Mono("正在替你说・・・", c.sora, 10, Modifier.align(Alignment.CenterVertically))
+        }
+        if (ui.replyMode) {
+            Spacer(Modifier.height(8.dp))
+            ui.suggestions.forEach { o ->
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp)).background(c.surfaceHi)
+                        .clickable(enabled = !ui.speaking) { CallController.sayReply(ui.id, o.text) }.padding(horizontal = 12.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Pill(o.label, c.sora)
+                    Spacer(Modifier.width(8.dp))
+                    Text(o.text, color = c.text, fontSize = 14.sp)
+                }
+            }
+            if (ui.suggestions.isEmpty() && !ui.speaking) Mono("对方说完后，这里会出现几句可选的回复", c.faint, 10, Modifier.padding(vertical = 4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 4.dp)) {
+                androidx.compose.material3.OutlinedTextField(
+                    draft, { draft = it }, placeholder = { Text("自己输入一句…", color = c.faint) }, singleLine = true,
+                    modifier = Modifier.weight(1f),
+                    colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(focusedBorderColor = c.sora, unfocusedBorderColor = c.line),
+                )
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    Modifier.size(48.dp).clip(CircleShape).background(if (draft.isNotBlank()) c.sora else c.line)
+                        .clickable(enabled = draft.isNotBlank() && !ui.speaking) { CallController.sayReply(ui.id, draft); draft = "" },
+                    contentAlignment = Alignment.Center,
+                ) { Icon(Icons.AutoMirrored.Outlined.Send, "说出去", tint = c.bgDeep) }
+            }
+            Mono("第一次代答前会说明「用语音助手回复」；每句话都由你决定", c.faint, 9, Modifier.padding(top = 4.dp))
+        }
+    }
+}
+
 @Composable
 private fun Transcript(ui: CallUi) {
     val c = J.c
     val state = rememberLazyListState()
     LaunchedEffect(ui.lines.size) { if (ui.lines.isNotEmpty()) state.animateScrollToItem(ui.lines.lastIndex) }
+    val pose = when (ui.voiceState) {
+        VoiceState.THINKING -> BuddyPose.THINKING
+        VoiceState.SPEAKING, VoiceState.GREETING -> BuddyPose.DETERMINED
+        else -> BuddyPose.IDLE
+    }
     Column(Modifier.fillMaxSize()) {
+        JuizBuddy(BuddyContext(hour = 0), height = 86.dp, showBubble = false, external = BuddyLine(pose, ""))
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 8.dp)) {
             StatusDot(c.sora, pulse = ui.voiceState == VoiceState.SPEAKING || ui.voiceState == VoiceState.LISTENING)
             Mono(
@@ -302,7 +371,7 @@ private fun Keypad(modifier: Modifier = Modifier, onDigit: (Char) -> Unit) {
 class DialerActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT), androidx.activity.SystemBarStyle.dark(android.graphics.Color.TRANSPARENT))
         val initial = intent?.data?.schemeSpecificPart.orEmpty()
         setContent {
             JuizTheme {

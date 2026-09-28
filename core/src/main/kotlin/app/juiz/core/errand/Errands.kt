@@ -42,6 +42,21 @@ data class ErrandGrant(
     val notes: List<InfoNote> = emptyList(),
 )
 
+/** 按字二元组重合度检索：「会议地点」也能命中「例会在 3 楼 301 会议室」。 */
+fun ErrandGrant.relevantNotes(query: String, minOverlap: Int = 1): List<InfoNote> {
+    fun grams(s: String): Set<String> {
+        val t = s.lowercase().filter { it.isLetterOrDigit() }
+        return if (t.length < 2) setOf(t) else (0 until t.length - 1).map { t.substring(it, it + 2) }.toSet()
+    }
+    val q = grams(query)
+    if (q.isEmpty()) return emptyList()
+    return notes.map { n -> n to (grams(n.title + n.content) intersect q).size }
+        .filter { it.second >= minOverlap }
+        .sortedByDescending { it.second }
+        .take(3)
+        .map { it.first }
+}
+
 data class CatalogFile(val name: String, val bytes: Long, val sha256: String)
 
 /** 可外发文件夹。Android 上由 SAF 授权的目录实现。 */
@@ -120,7 +135,7 @@ class ErrandService(
     }
 
     suspend fun sendFile(g: ErrandGrant, fileName: String, conversationId: String): SendResult {
-        if (!canSendFiles(g)) return SendResult.Refused("主人没有为这个号码开启发送文件，或没有配置可外发文件夹/发信账号")
+        if (!canSendFiles(g)) return SendResult.Refused("本人没有为这个号码开启发送文件，或没有配置可外发文件夹/发信账号")
         val to = g.deliveryEmail!!
         val entry = catalog!!.list().firstOrNull { it.name == fileName }
             ?: return SendResult.Refused("可外发文件夹里没有名为「$fileName」的文件，请先用 list_authorized_files 查找准确的文件名")
@@ -156,12 +171,12 @@ class ErrandService(
         }
     }
 
-    fun lookup(g: ErrandGrant, query: String): List<InfoNote> {
-        val terms = query.split(Regex("[\\s，,、？?的]+")).filter { it.length >= 1 }
-        return g.notes.filter { n -> terms.any { t -> t.length >= 2 && (n.title.contains(t) || n.content.contains(t)) } }.take(3)
-    }
+    fun lookup(g: ErrandGrant, query: String): List<InfoNote> = g.relevantNotes(query)
 
     companion object {
+        /** 至少两个字二元组重合才附给模型，避免把无关资料塞进对话。 */
+        fun ErrandGrant.relevantNotesFor(text: String): List<InfoNote> = relevantNotes(text, minOverlap = 2)
+
         fun mask(email: String): String {
             val at = email.indexOf('@')
             if (at <= 1) return email

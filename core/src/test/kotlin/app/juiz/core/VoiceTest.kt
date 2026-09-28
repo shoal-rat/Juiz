@@ -79,7 +79,7 @@ class VoiceTest {
             override val sampleRate = 24_000
             override val partials: SharedFlow<String> = MutableSharedFlow()
             override fun append(pcm: ShortArray) {}
-            override suspend fun commit(timeoutMs: Long) = transcripts.removeFirstOrNull() ?: ""
+            override fun commit() = CompletableDeferred(transcripts.removeFirstOrNull() ?: "")
             override fun clear() {}
             override fun close() {}
         }

@@ -44,7 +44,9 @@ object Notifications {
             .setFullScreenIntent(inCallIntent(ctx), true)
             .setContentIntent(inCallIntent(ctx))
         if (Build.VERSION.SDK_INT >= 31) {
+            // 带全屏意图的来电 CallStyle 是系统允许的；额外加一个「Juiz 代接」
             b.setStyle(Notification.CallStyle.forIncomingCall(person, pi(ctx, CallActionReceiver.DECLINE, ui.id, 2), pi(ctx, CallActionReceiver.ANSWER, ui.id, 1)))
+            b.addAction(Notification.Action.Builder(null, "Juiz 代接", pi(ctx, CallActionReceiver.JUIZ, ui.id, 6)).build())
         } else {
             b.addAction(Notification.Action.Builder(null, "拒接", pi(ctx, CallActionReceiver.DECLINE, ui.id, 2)).build())
             b.addAction(Notification.Action.Builder(null, "接听", pi(ctx, CallActionReceiver.ANSWER, ui.id, 1)).build())
@@ -52,7 +54,11 @@ object Notifications {
         return b.build()
     }
 
-    fun ongoing(ctx: Context, ui: CallUi): Notification {
+    /**
+     * 通话中的常驻通知。CallStyle 只允许前台服务使用（否则系统会直接抛异常），
+     * 所以只有 callStyle=true（已进入前台）时才用它，其余情况用普通样式 + 挂断按钮。
+     */
+    fun ongoing(ctx: Context, ui: CallUi, callStyle: Boolean = false): Notification {
         val person = Person.Builder().setName(ui.caller.displayName ?: ui.caller.number).build()
         val b = Notification.Builder(ctx, JuizApp.CH_ONGOING)
             .setSmallIcon(R.drawable.ic_launcher_fg)
@@ -61,8 +67,10 @@ object Notifications {
             .setCategory(Notification.CATEGORY_CALL)
             .setOngoing(true)
             .setContentIntent(inCallIntent(ctx))
-        if (Build.VERSION.SDK_INT >= 31) {
+        if (callStyle && Build.VERSION.SDK_INT >= 31) {
             b.setStyle(Notification.CallStyle.forOngoingCall(person, pi(ctx, CallActionReceiver.HANGUP, ui.id, 3)))
+        } else {
+            b.addAction(Notification.Action.Builder(null, "挂断", pi(ctx, CallActionReceiver.HANGUP, ui.id, 3)).build())
         }
         if (ui.aiMode == AiMode.AI_VOICE) {
             b.addAction(Notification.Action.Builder(null, "接管", pi(ctx, CallActionReceiver.TAKEOVER, ui.id, 4)).build())
@@ -70,7 +78,7 @@ object Notifications {
         return b.build()
     }
 
-    fun escalation(ctx: Context, ui: CallUi?, s: EscalationSignal) {
+    fun escalation(ctx: Context, ui: CallUi?, s: EscalationSignal) = runCatching {
         val nm = ctx.getSystemService(NotificationManager::class.java)
         val who = ui?.caller?.label ?: "来电"
         val b = Notification.Builder(ctx, JuizApp.CH_ESCALATION)
@@ -86,7 +94,7 @@ object Notifications {
         nm.notify(ID_ESCALATION, b.build())
     }
 
-    fun simple(ctx: Context, channel: String, id: Int, title: String, text: String) {
+    fun simple(ctx: Context, channel: String, id: Int, title: String, text: String) = runCatching {
         val nm = ctx.getSystemService(NotificationManager::class.java)
         nm.notify(
             id,
@@ -110,6 +118,7 @@ class CallActionReceiver : BroadcastReceiver() {
             DECLINE -> CallController.reject(id)
             HANGUP -> CallController.hangup(id)
             TAKEOVER -> CallController.takeover(id)
+            JUIZ -> CallController.aiAnswerNow(id)
         }
     }
 
@@ -118,5 +127,6 @@ class CallActionReceiver : BroadcastReceiver() {
         const val DECLINE = "app.juiz.DECLINE"
         const val HANGUP = "app.juiz.HANGUP"
         const val TAKEOVER = "app.juiz.TAKEOVER"
+        const val JUIZ = "app.juiz.JUIZ"
     }
 }

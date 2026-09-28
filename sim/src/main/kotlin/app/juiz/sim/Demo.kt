@@ -65,7 +65,7 @@ object Demo {
         core.conversations.end(engine.context.conversationId, "demo", "创建任务")
         val task = core.tasks.all().first()
 
-        step(3, "主人确认 → 交给 ChatGPT Work（分享任务卡路径）")
+        step(3, "本人确认 → 交给 ChatGPT Work（分享任务卡路径）")
         val r = core.handoff().handoff(task.id, HandoffRoute.MANUAL_SHARE) as HandoffResult.ShareNeeded
         println(Ansi.dim(r.cardText.lines().take(14).joinToString("\n") { "  │ $it" }))
         println(Ansi.dim("  │ …"))

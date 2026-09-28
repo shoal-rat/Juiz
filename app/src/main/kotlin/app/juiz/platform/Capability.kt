@@ -104,6 +104,14 @@ object CapabilityProbe {
             null -> "缺少权限，无法检测"
         }, forL1 = true)
 
+        val screening = SystemCallApi.screeningModeSupported(ctx.getSystemService(AudioManager::class.java))
+        items += ProbeItem(
+            "screening_mode", "来电筛选音频模式",
+            if (screening) ProbeStatus.OK else ProbeStatus.NA,
+            if (screening) "支持：AI 代接时本机听筒与麦克风完全不接入，可「模拟响铃」交还" else "不支持：改用「接听 + 静音本机麦克风」路径，交还时直接取消静音",
+            forL1 = true,
+        )
+
         val report = validationReport()
         val validated = report != null && report.fingerprint == Build.FINGERPRINT && report.passesCore
         add("validated", "真机验证（本系统版本）", if (report == null) null else validated, when {
@@ -125,5 +133,5 @@ object CapabilityProbe {
     }
 
     /** L1 的"能尝试"条件（不含真机验证），验证向导用它判断能否开始。 */
-    fun l1Attemptable(r: ProbeResult) = r.items.filter { it.forL1 && it.id != "validated" && it.id != "perm_capture" }.all { it.status == ProbeStatus.OK }
+    fun l1Attemptable(r: ProbeResult) = r.items.filter { it.forL1 && it.id !in setOf("validated", "perm_capture", "screening_mode") }.all { it.status == ProbeStatus.OK }
 }

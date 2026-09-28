@@ -37,11 +37,20 @@ object SystemCallApi {
 
     private fun invoke(clazz: Class<*>, target: Any, name: String, vararg args: Any?): Any? =
         try {
-            HiddenApiBypass.invoke(clazz, target, name, *args)
-        } catch (e: NoSuchMethodException) {
-            // 某些 ROM 上 HiddenApiBypass 找不到时退回普通反射
-            clazz.methods.first { it.name == name && it.parameterTypes.size == args.size }.invoke(target, *args)
+            try {
+                HiddenApiBypass.invoke(clazz, target, name, *args)
+            } catch (e: NoSuchMethodException) {
+                // 某些 ROM 上 HiddenApiBypass 找不到时退回普通反射
+                clazz.methods.first { it.name == name && it.parameterTypes.size == args.size }.invoke(target, *args)
+            }
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            // 把系统抛出的真实原因暴露出来（例如"not available in mode NORMAL"）
+            throw e.targetException ?: e
         }
+
+    /** 音频策略是否支持"来电筛选"模式；不支持时只能走"接听 + 静音本机麦克风"的备用路径。 */
+    fun screeningModeSupported(am: AudioManager): Boolean =
+        Build.VERSION.SDK_INT >= 30 && am.isCallScreeningModeSupported
 
     fun methodExists(clazz: Class<*>, name: String): Boolean =
         runCatching { HiddenApiBypass.getDeclaredMethods(clazz).any { (it as java.lang.reflect.Method).name == name } }.getOrDefault(false) ||

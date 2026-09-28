@@ -2,4 +2,6 @@
 <resources>
     <string name="app_name">Juiz</string>
     <string name="dialer_label">Juiz 拨号</string>
+    <string name="assist_description">实验功能：你在 Juiz 里点「交给 ChatGPT」后的 60 秒内，帮你在 ChatGPT App 中切换到 Work 模式并按发送。只在 ChatGPT App 中生效，不读取回答内容。</string>
+    <string name="import_label">导入到 Juiz 委托</string>
 </resources>

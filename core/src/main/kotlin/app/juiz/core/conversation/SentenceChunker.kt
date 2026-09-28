@@ -14,14 +14,24 @@ class SentenceChunker(
     private val enders = setOf('。', '！', '？', '；', '!', '?', ';', '\n')
     private val soft = setOf('，', '、', ',', '：', ':')
 
+    /** 英文句点只有后面跟空白才算句末，避免把 3.5、wang@example.com 之类切开。 */
+    private var pendingDot = false
+
     fun push(delta: String): List<String> {
         val out = mutableListOf<String>()
         for (ch in delta) {
+            if (pendingDot) {
+                pendingDot = false
+                if (ch.isWhitespace()) {
+                    take()?.let { out += it }
+                    continue
+                }
+            }
             buf.append(ch)
             val len = buf.length
             when {
                 ch in enders -> take()?.let { out += it }
-                ch == '.' && len > 1 && !buf[len - 2].isDigit() -> take()?.let { out += it }
+                ch == '.' && len > 1 && !buf[len - 2].isDigit() -> pendingDot = true
                 ch in soft && !emittedAny && len >= earlyCommaAfter -> take()?.let { out += it }
                 len >= hardLimit && ch in soft -> take()?.let { out += it }
                 len >= hardLimit * 2 -> take()?.let { out += it }

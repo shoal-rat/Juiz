@@ -36,6 +36,8 @@ data class NewTask(
     val deliverable: String? = null,
     val due: String? = null,
     val note: String? = null,
+    /** 通话侧小模型写给执行方大模型的工作说明。 */
+    val brief: String? = null,
 )
 
 /** 外发动作执行结果。UNKNOWN 表示"不知道到底发没发出去"，只能由主人核实，绝不自动重试。 */
@@ -65,7 +67,7 @@ class TaskService(
             id, now, now, TaskStatus.PENDING_CONFIRMATION.name, t.title, t.request, t.kind.name,
             t.contactNumber, t.contactName, t.conversationId,
             JuizJson.encodeToString(fieldsSerializer, t.confirmedFields),
-            t.deliverable, t.due, t.note,
+            t.deliverable, t.due, t.note, t.brief,
         )
         archive.append("task.created", id) {
             put("title", t.title)
@@ -110,11 +112,11 @@ class TaskService(
         val cur = get(id) ?: throw NoSuchElementException("任务不存在：$id")
         require(note.isNotBlank()) { "请写明核对说明" }
         if (cur.status.terminal) return@transactionWithResult cur
-        q.setTaskStatus(TaskStatus.COMPLETED.name, clock.millis(), "主人核对：$note", id)
+        q.setTaskStatus(TaskStatus.COMPLETED.name, clock.millis(), "本人核对：$note", id)
         archive.append("task.status", id) {
             put("from", cur.status.name)
             put("to", TaskStatus.COMPLETED.name)
-            put("note", "主人核对：$note")
+            put("note", "本人核对：$note")
             put("by", "owner")
         }
         get(id)!!
@@ -213,7 +215,7 @@ class TaskService(
             ExecutionOutcome.Failed(e.message ?: "发送失败")
         } catch (e: Exception) {
             setActionStatus(actionId, ActionStatus.UNKNOWN, e.toString(), setOf(ActionStatus.EXECUTING))
-            ExecutionOutcome.Failed("结果未知，请主人核实是否已发出：${e.message}")
+            ExecutionOutcome.Failed("结果未知，请本人核实是否已发出：${e.message}")
         }
     }
 
@@ -226,7 +228,7 @@ class TaskService(
 
     /** 主人核实 UNKNOWN 动作的实际结果。 */
     fun resolveUnknown(actionId: String, actuallySent: Boolean, note: String) =
-        setActionStatus(actionId, if (actuallySent) ActionStatus.DONE else ActionStatus.FAILED, "主人核实：$note", setOf(ActionStatus.UNKNOWN))
+        setActionStatus(actionId, if (actuallySent) ActionStatus.DONE else ActionStatus.FAILED, "本人核实：$note", setOf(ActionStatus.UNKNOWN))
 
     private fun setActionStatus(id: String, to: ActionStatus, receipt: String?, from: Set<ActionStatus>) {
         db.transaction {
@@ -274,6 +276,7 @@ class TaskService(
         resultSummary = result_summary,
         verification = verification,
         note = note,
+        brief = brief,
     )
 
     private fun Outbound_action.toModel() = OutboundAction(

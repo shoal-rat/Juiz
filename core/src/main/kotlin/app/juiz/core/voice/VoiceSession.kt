@@ -22,8 +22,8 @@ enum class VoiceState { GREETING, LISTENING, THINKING, SPEAKING, ENDED }
 
 enum class EndReason(val zh: String) {
     CALLER_GOODBYE("对话结束"),
-    TAKEOVER("主人接管"),
-    ESCALATED("转交主人"),
+    TAKEOVER("本人接管"),
+    ESCALATED("转交本人"),
     SILENCE_TIMEOUT("对方长时间无应答"),
     MAX_DURATION("达到通话时长上限"),
     ERROR("语音链路故障"),
@@ -123,19 +123,32 @@ class VoiceSession(
     }
 
     private suspend fun CoroutineScope.captureLoop(session: SttSession) {
+        // 两个 VAD：vad 负责断句和送转写（始终用正常门限，AI 说话时对方的话也不丢）；
+        // barge 只负责判断"要不要打断 Juiz"（高门限、更长时间，避免残余回声误触发）。
         val vad = EnergyVad(audio.captureRate, config.vad)
+        val barge = EnergyVad(audio.captureRate, config.vad)
         val toStt = StreamingResampler(audio.captureRate, session.sampleRate)
         val preRoll = PreRoll(audio.captureRate * config.preRollMs / 1000)
+        val joiner = UtteranceJoiner(this, { vad.inSpeech }) { text, endedAt -> startTurn(text, endedAt) }
+        val agc = Agc()
         try {
-            audio.captured().collect { frame ->
+            audio.captured().collect { raw ->
+                val frame = agc.process(raw)
                 val speaking = _state.value == VoiceState.SPEAKING || _state.value == VoiceState.GREETING
+                if (speaking) {
+                    if (barge.process(frame, strict = true) == VadEvent.SPEECH_START) bargeIn()
+                } else {
+                    barge.reset()
+                }
                 val wasInSpeech = vad.inSpeech
-                val ev = vad.process(frame, strict = speaking)
+                val ev = vad.process(frame)
                 if (!wasInSpeech && ev != VadEvent.SPEECH_START) preRoll.add(frame)
                 when (ev) {
                     VadEvent.SPEECH_START -> {
                         lastActivity.set(System.currentTimeMillis())
-                        if (speaking || _state.value == VoiceState.THINKING) bargeIn()
+                        joiner.callerResumed()
+                        // 对方还在说，而我们在"想"：别回答半句话
+                        if (_state.value == VoiceState.THINKING) bargeIn()
                         preRoll.drain().forEach { session.append(toStt.process(it)) }
                         session.append(toStt.process(frame))
                     }
@@ -143,17 +156,19 @@ class VoiceSession(
                         lastActivity.set(System.currentTimeMillis())
                         if (vad.lastWasMeaningful) {
                             val endedAt = System.currentTimeMillis()
+                            val pending = session.commit() // 此刻同步封口
                             launch {
                                 val text = try {
-                                    session.commit(config.sttCommitTimeoutMs).trim()
+                                    kotlinx.coroutines.withTimeout(config.sttCommitTimeoutMs) { pending.await() }.trim()
                                 } catch (e: Exception) {
-                                    if (e is kotlinx.coroutines.CancellationException) throw e
+                                    if (e is kotlinx.coroutines.CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
                                     ""
                                 }
-                                if (text.isNotEmpty()) startTurn(text, endedAt)
+                                if (text.isNotEmpty()) joiner.add(text, endedAt) else joiner.resume()
                             }
                         } else {
                             session.clear()
+                            joiner.resume()
                         }
                         toStt.reset()
                     }

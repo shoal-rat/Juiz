@@ -21,7 +21,7 @@ object Saf {
     const val KEY_OUTBOX = "saf_outbox"
 
     fun remember(context: Context, key: String, uri: Uri) {
-        context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
         JuizApp.core.settings.putRaw(key, uri.toString())
     }
 
@@ -53,6 +53,16 @@ private class SafFolder(private val context: Context, private val tree: Uri) : E
 
     override fun open(relPath: String): InputStream? =
         find(relPath)?.takeIf { it.isFile }?.let { context.contentResolver.openInputStream(it.uri) }
+
+    override fun write(relPath: String, bytes: ByteArray): Boolean = runCatching {
+        var dir = DocumentFile.fromTreeUri(context, tree) ?: return false
+        val parts = relPath.split('/').filter { it.isNotEmpty() && it != ".." }
+        for (p in parts.dropLast(1)) dir = dir.findFile(p)?.takeIf { it.isDirectory } ?: dir.createDirectory(p) ?: return false
+        val name = parts.last()
+        val file = dir.findFile(name) ?: dir.createFile("application/octet-stream", name) ?: return false
+        context.contentResolver.openOutputStream(file.uri, "wt")?.use { it.write(bytes) } ?: return false
+        true
+    }.getOrDefault(false)
 }
 
 private class SafCatalog(private val context: Context, private val tree: Uri) : FileCatalog {

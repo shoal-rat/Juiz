@@ -72,7 +72,7 @@ import app.juiz.ui.theme.J
 import java.io.File
 
 private val pages = listOf(
-    Triple("owner", "主人资料", "称呼、对外状态、开场白"),
+    Triple("owner", "我的资料", "名字、Juiz 怎么称呼你、对外状态、开场白"),
     Triple("rules", "来电规则", "谁的电话、什么时候、怎么处理"),
     Triple("errands", "深夜代办授权", "允许 Juiz 为指定联系人直接办的小事"),
     Triple("consent", "同意与音色", "录音、转写留存、克隆音色、短信代办"),
@@ -168,13 +168,15 @@ fun ToggleRow(title: String, sub: String?, on: Boolean, onChange: (Boolean) -> U
 private fun ownerPage(say: (String) -> Unit) {
     val p = query { JuizApp.core.settings.ownerProfile() } ?: return
     var name by remember(p) { mutableStateOf(p.ownerName) }
+    var address by remember(p) { mutableStateOf(p.addressAs) }
     var assistant by remember(p) { mutableStateOf(p.assistantName) }
     var status by remember(p) { mutableStateOf(p.publicStatus) }
     var bio by remember(p) { mutableStateOf(p.publicBio) }
     var greeting by remember(p) { mutableStateOf(p.greetingTemplate) }
     var sms by remember(p) { mutableStateOf(p.smsGreetingTemplate) }
     JuizCard {
-        Field("你的称呼（Juiz 这样称呼你）", name, { name = it })
+        Field("你的名字（对来电方介绍时使用）", name, { name = it })
+        Field("Juiz 怎么称呼你", address, { address = it }, hint = "伙伴")
         Field("助理名", assistant, { assistant = it })
         Field("可以对外说明的状态", status, { status = it }, singleLine = false, hint = "例如：下午在开会，五点后方便回电")
         Field("可以对外介绍的背景", bio, { bio = it }, singleLine = false, hint = "例如：在某公司做产品经理")
@@ -184,7 +186,7 @@ private fun ownerPage(say: (String) -> Unit) {
         Spacer(Modifier.height(8.dp))
         PrimaryButton("保存", Modifier.fillMaxWidth()) {
             act {
-                val problems = JuizApp.core.settings.saveOwnerProfile(OwnerProfile(name, assistant, greeting, status, bio, sms))
+                val problems = JuizApp.core.settings.saveOwnerProfile(OwnerProfile(name, address.trim().ifBlank { "伙伴" }, assistant, greeting, status, bio, sms))
                 say(if (problems.isEmpty()) "已保存" else "开场白不合规：" + problems.joinToString("；"))
             }
         }
@@ -386,7 +388,7 @@ private fun consentPage(say: (String) -> Unit) {
         consents.forEach { r ->
             val sub = when (r.kind) {
                 ConsentKind.CLONED_VOICE -> "关闭后使用普通合成音色；撤销立即生效并删除缓存"
-                ConsentKind.CALL_RECORDING -> "开启后开场白会告知对方录音"
+                ConsentKind.CALL_RECORDING -> "开场白会告知对方录音；录音加密存在本机，确认任务时可回放核对，30 天后自动删除；关闭即删除全部录音"
                 ConsentKind.TRANSCRIPT_RETENTION -> "关闭后只保留摘要与任务；档案里只有哈希"
                 ConsentKind.SMS_SCREENING -> "L0：拒接后以短信继续对话"
             }
@@ -485,29 +487,59 @@ private fun workPage(activity: MainActivity, say: (String) -> Unit) {
     val ctx = LocalContext.current
     val w = query { JuizApp.core.settings.work() } ?: return
     val folder = query { Saf.label(ctx, Saf.KEY_EXCHANGE) }
+    val hasKey = query { JuizApp.instance.secrets.has(Secrets.OPENAI) } ?: false
+    var cloudModel by remember(w) { mutableStateOf(w.cloudModel) }
+    var cloudEffort by remember(w) { mutableStateOf(w.cloudEffort) }
     var trigger by remember(w) { mutableStateOf(w.triggerId) }
     var hint by remember(w) { mutableStateOf(w.exchangeFolderHint) }
     var token by remember { mutableStateOf("") }
+    fun save(nw: app.juiz.core.settings.WorkConfig) = act { JuizApp.core.settings.saveWork(nw) }
+
+    SectionHeader("executor", "谁来干活")
+    JuizCard(accent = c.sora) {
+        Text("电话里接到的活，由 Juiz 写好任务卡和工作说明交给执行方。执行方只能产出文件和草稿；任何外发都要你最后批准。", color = c.sub, fontSize = 12.sp)
+        ToggleRow("云端大模型（手机直连 OpenAI）", if (hasKey) "gpt-6-sol 在云端沙箱生成文件，手机下载后核验。按 API 计费。" else "需要先在「模型与密钥」里填 OpenAI API Key", w.cloudEnabled && hasKey) { v -> save(w.copy(cloudEnabled = v)) }
+        Field("云端模型", cloudModel, { cloudModel = it }, hint = "gpt-6-sol")
+        Field("推理强度", cloudEffort, { cloudEffort = it }, hint = "medium")
+        ToggleRow("熟人来的活自动交出", "通讯录/重要联系人的委托创建后直接交给执行方，每天最多 ${w.autoHandoffDailyLimit} 件；陌生号码仍需你先确认", w.autoHandoff) { v -> save(w.copy(autoHandoff = v)) }
+        PrimaryButton("保存", Modifier.fillMaxWidth()) { save(w.copy(cloudModel = cloudModel.trim().ifBlank { "gpt-6-sol" }, cloudEffort = cloudEffort.trim())); say("已保存") }
+    }
+
+    SectionHeader("chatgpt app", "ChatGPT App（Work 模式）")
     JuizCard {
-        Text("Workspace Agents API 需要工作区管理员启用并允许创建访问令牌。代理的回复目前不能通过接口取回，所以交付物走交换目录 + result.json 核验。没有 API 时，可以用「分享任务卡」半自动交接。", color = c.sub, fontSize = 12.sp)
+        Text("委托页的「交给 ChatGPT App」会把任务卡直接带进 ChatGPT App；完成后在 ChatGPT 里把成品分享给 Juiz（选「导入到 Juiz 委托」），Juiz 会自动核验。", color = c.sub, fontSize = 12.sp)
+        val assist = query { app.juiz.bridge.ChatGptBridge.assistEnabled() } ?: false
+        val serviceOn = app.juiz.bridge.ChatGptBridge.serviceOn(ctx)
+        ToggleRow("辅助点按（实验）", "只在你发起交接后的 60 秒内、只在 ChatGPT App 里切到 Work 并按发送；不读取回答。ChatGPT 条款限制自动化使用，风险自担。" + if (!serviceOn) "（还需在系统无障碍设置里打开）" else "", assist) { v ->
+            act { app.juiz.bridge.ChatGptBridge.setAssist(v) }
+            if (v && !serviceOn) ctx.startActivity(android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+        }
+    }
+
+    SectionHeader("workspace", "Workspace Agents API（企业工作区）")
+    JuizCard {
+        Text("需要工作区管理员启用并允许创建访问令牌。代理的回复目前不能通过接口取回，成品需写回交换目录或分享给 Juiz 导入。", color = c.sub, fontSize = 12.sp)
         Field("触发 ID（agtch_…）", trigger, { trigger = it })
         Field("访问令牌", token, { token = it }, secret = true, hint = if (JuizApp.instance.secrets.has(Secrets.WORKSPACE_AGENT)) "已保存，留空不修改" else null)
-        Field("任务卡里写的交换目录名", hint, { hint = it })
         PrimaryButton("保存", Modifier.fillMaxWidth()) {
             act {
-                JuizApp.core.settings.saveWork(w.copy(triggerId = trigger.trim(), exchangeFolderHint = hint.trim().ifBlank { "Juiz" }))
+                JuizApp.core.settings.saveWork(JuizApp.core.settings.work().copy(triggerId = trigger.trim()))
                 if (token.isNotBlank()) JuizApp.instance.secrets.put(Secrets.WORKSPACE_AGENT, token.trim())
                 say("已保存")
             }
         }
     }
-    SectionHeader("exchange", "交换目录（本机）")
+
+    SectionHeader("desk", "电脑上的 Codex（可选）")
     JuizCard {
+        Text("如果你愿意让电脑也帮忙：在电脑上运行 juiz-desk，并用同步盘把下面这个交换目录同步到电脑。手机连不上电脑时，任务会等在目录里。", color = c.sub, fontSize = 12.sp)
+        ToggleRow("启用 juiz-desk", null, w.deskEnabled) { v -> save(w.copy(deskEnabled = v)) }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(folder ?: "尚未选择", color = c.text, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            Text(folder ?: "尚未选择交换目录", color = c.text, fontSize = 14.sp, modifier = Modifier.weight(1f))
             GhostButton("选择") { activity.openFolder { uri -> act { Saf.remember(ctx, Saf.KEY_EXCHANGE, uri) } } }
         }
-        Text("选一个会被云盘同步到本机的文件夹。代理能否写入该目录取决于你的工具与账号，需要实测。", color = c.faint, fontSize = 11.sp)
+        Field("任务卡里写的目录名", hint, { hint = it })
+        GhostButton("保存目录名", Modifier.fillMaxWidth()) { save(w.copy(exchangeFolderHint = hint.trim().ifBlank { "Juiz" })); say("已保存") }
     }
 }
 

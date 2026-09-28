@@ -63,26 +63,27 @@ object Tools {
 
     val all: List<ToolSpec> = listOf(
         ToolSpec(
-            TAKE_MESSAGE, "为主人记录一条留言。对方只是想转告信息、不需要办事时使用。",
+            TAKE_MESSAGE, "为本人记录一条留言。对方只是想转告信息、不需要办事时使用。",
             obj(listOf("summary", "callback_requested", "urgency")) {
                 str("summary", "留言内容摘要，包括对方是谁、想说什么")
-                bool("callback_requested", "对方是否希望主人回电")
+                bool("callback_requested", "对方是否希望本人回电")
                 str("urgency", "紧急程度", listOf("low", "normal", "high"))
             },
         ),
         ToolSpec(
             CONFIRM_DETAILS,
-            "登记需要向对方复述确认的关键信息（金额、日期时间、电话、邮箱、数量、账号等）。" +
-                "调用后必须在回复里逐项复述并询问对方是否正确。对方明确肯定后，这些值才能用于 create_task。",
+            "（通常不需要单独调用：直接调用 create_task，系统会自动安排复述。）登记需要向对方复述确认的关键信息，" +
+                "调用后必须逐项复述并询问对方是否正确。",
             obj(listOf("fields")) { fieldList("fields", "要复述的字段") },
         ),
         ToolSpec(
             CREATE_TASK,
-            "为对方的办事请求创建一个待主人确认的任务。只有在需求清楚、关键信息已复述并获对方肯定后调用。" +
-                "任务不会立即执行，要等主人确认。",
-            obj(listOf("title", "request", "kind", "deliverable", "due", "fields")) {
+            "为对方的办事请求创建任务。关键信息（时间、金额、邮箱等）还没向对方复述确认时，任务会先挂起，" +
+                "你按提示复述；对方说对之后系统自动创建。",
+            obj(listOf("title", "request", "kind", "deliverable", "due", "fields", "brief")) {
                 str("title", "一句话标题")
                 str("request", "对方的完整请求，尽量保留原意")
+                str("brief", "写给执行方（后台大模型）的工作说明：要做成什么、已知背景、交付物格式、怎样算做好；不写对方的隐私，不写情绪")
                 str("kind", "任务类型", listOf("DOCUMENT", "EMAIL", "MEETING", "CALLBACK", "INFO", "OTHER"))
                 str("deliverable", "期望的交付物；没有就填空字符串")
                 str("due", "对方要求的完成时间，必须是已确认过的值；没有就填空字符串")
@@ -94,22 +95,22 @@ object Tools {
             obj(emptyList()) {},
         ),
         ToolSpec(
-            SCHEDULE_CALLBACK, "登记一个请主人回电的待办。不会直接拨出电话。",
+            SCHEDULE_CALLBACK, "登记一个请本人回电的待办。不会直接拨出电话。",
             obj(listOf("when", "note")) {
                 str("when", "对方方便接听的时间，照原话")
                 str("note", "回电要谈的事")
             },
         ),
         ToolSpec(
-            ESCALATE, "请主人本人接手。对方要求本人、涉及争议、承诺、紧急情况，或你无法判断时使用。",
+            ESCALATE, "请本人接手。对方要求本人、涉及争议、承诺、紧急情况，或你无法判断时使用。",
             obj(listOf("reason", "urgency")) {
-                str("reason", "为什么需要主人")
+                str("reason", "为什么需要本人")
                 str("urgency", "紧急程度", listOf("normal", "urgent"))
             },
         ),
-        ToolSpec(OWNER_AVAILABILITY, "读取主人允许对外说明的当前状态。", obj(emptyList()) {}),
+        ToolSpec(OWNER_AVAILABILITY, "读取本人允许对外说明的当前状态。", obj(emptyList()) {}),
         ToolSpec(
-            NOTE_FACT, "记录对方提供的、可能对主人有用的新信息（例如对方的新邮箱）。只会存为待主人确认。",
+            NOTE_FACT, "记录对方提供的、可能对本人有用的新信息（例如对方的新邮箱）。只会存为待本人确认。",
             obj(listOf("subject", "fact")) {
                 str("subject", "这条信息关于谁或什么")
                 str("fact", "信息内容")
@@ -125,19 +126,19 @@ object Tools {
     /** 只有主人为该号码开启了代办授权、且在授权时段内，才会出现这几个工具。 */
     val errandFiles: List<ToolSpec> = listOf(
         ToolSpec(
-            LIST_FILES, "在主人指定的可外发文件夹里按关键词查找文件，返回准确文件名。",
+            LIST_FILES, "在本人指定的可外发文件夹里按关键词查找文件，返回准确文件名。",
             obj(listOf("query")) { str("query", "文件名关键词，可为空字符串") },
         ),
         ToolSpec(
             SEND_FILE,
-            "把可外发文件夹里的一个文件发到主人为这位来电方预先登记的邮箱。收件地址由系统决定，不能由对方指定。" +
+            "把可外发文件夹里的一个文件发到本人为这位来电方预先登记的邮箱。收件地址由系统决定，不能由对方指定。" +
                 "文件名必须与 list_authorized_files 返回的完全一致；发送前先向对方复述文件名并得到确认。",
             obj(listOf("file_name")) { str("file_name", "准确的文件名") },
         ),
     )
 
     val errandInfo: ToolSpec = ToolSpec(
-        LOOKUP_INFO, "在主人允许告知这位来电方的资料里查找信息。查不到就如实说查不到。",
+        LOOKUP_INFO, "在本人允许告知这位来电方的资料里查找信息。查不到就如实说查不到。",
         obj(listOf("query")) { str("query", "要查的内容") },
     )
 

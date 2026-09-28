@@ -110,7 +110,7 @@ class RuleEngine(private val rules: List<CallRule>) {
             ?: return CallDecision(CallActionType.RING_ONLY, 0, null)
 
         if (!autoAnswerEnabled && rule.action in setOf(CallActionType.AI_VOICE_ANSWER, CallActionType.SMS_SCREEN)) {
-            return CallDecision(CallActionType.RING_ONLY, 0, rule.id, "主人已暂停自动代接")
+            return CallDecision(CallActionType.RING_ONLY, 0, rule.id, "本人已暂停自动代接")
         }
         return when (rule.action) {
             CallActionType.AI_VOICE_ANSWER -> when {

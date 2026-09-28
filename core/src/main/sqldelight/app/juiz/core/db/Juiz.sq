@@ -20,15 +20,16 @@ CREATE TABLE task (
     work_conversation_url TEXT,
     result_summary TEXT,
     verification TEXT,
-    note TEXT
+    note TEXT,
+    brief TEXT
 );
 
 CREATE INDEX task_contact ON task(contact_number);
 
 insertTask:
 INSERT INTO task(id, created_at, updated_at, status, title, request, kind, contact_number, contact_name,
-    conversation_id, confirmed_fields, deliverable, due, note)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    conversation_id, confirmed_fields, deliverable, due, note, brief)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 selectTask:
 SELECT * FROM task WHERE id = ?;

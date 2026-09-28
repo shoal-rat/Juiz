@@ -60,6 +60,13 @@ class JuizCore(
     val clock: Clock,
     val secrets: Secrets,
     private val fileCatalog: () -> FileCatalog? = { null },
+    /** 与电脑同步的交换目录（juiz-desk 在另一端）。 */
+    private val exchangeFolder: () -> app.juiz.core.work.ExchangeFolder? = { null },
+    /** 云端执行成品的本地存放目录（应用私有目录）。 */
+    private val cloudDir: java.io.File? = null,
+    /** 通话录音目录与加密器（Android：no-backup 目录 + Keystore 密钥）。任一为空则不录音。 */
+    recordingDir: java.io.File? = null,
+    recordingCipher: app.juiz.core.recording.RecordingCipher? = null,
 ) {
     val db = JuizDatabase(driver)
     val archive = ArchiveLog(db, clock)
@@ -68,11 +75,45 @@ class JuizCore(
     val memory = MemoryService(db, clock, archive)
     val tasks = TaskService(db, clock, archive)
     val grants = GrantStore(db)
+    val recordings: app.juiz.core.recording.RecordingStore? =
+        if (recordingDir != null && recordingCipher != null) app.juiz.core.recording.RecordingStore(recordingDir, recordingCipher, archive, clock) else null
+
+    init {
+        // 撤销录音同意：已有录音全部删除（删除记入档案）
+        consents.onChange { kind, granted -> if (kind == ConsentKind.CALL_RECORDING && !granted) recordings?.deleteAll("撤销录音同意") }
+    }
+
+    /** 这一通电话要不要录：有录音库、且本人开了录音同意（开场白会告知对方）。 */
+    fun shouldRecordCalls(): Boolean = recordings != null && consents.isGranted(ConsentKind.CALL_RECORDING)
 
     val errands: ErrandService
         get() = ErrandService(db, clock, archive, tasks, grants, fileCatalog(), mailer(), { settings.ownerProfile().ownerName })
 
-    val executor: ToolExecutor get() = ToolExecutor(tasks, memory, archive, { settings.ownerProfile() }, errands)
+    val executor: ToolExecutor
+        get() = ToolExecutor(tasks, memory, archive, { settings.ownerProfile() }, errands, onTaskCreated = ::autoHandoff)
+
+    /**
+     * 自动交给电脑上的 Codex：只对通讯录/重要联系人、非回电类任务，每天有上限。
+     * Codex 只能产出文件和草稿，任何外发仍要本人批准，所以这一步不需要预先确认。
+     */
+    fun autoHandoff(task: app.juiz.core.model.Task, caller: app.juiz.core.model.CallerInfo) {
+        val w = settings.work()
+        if (!w.autoHandoff) return
+        if (task.kind == app.juiz.core.model.TaskKind.CALLBACK) return
+        if (caller.tier != app.juiz.core.model.ContactTier.KNOWN && caller.tier != app.juiz.core.model.ContactTier.VIP) return
+        val day = java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd").format(clock.now().atZone(clock.zone()))
+        val used = db.juizQueries.getCounter(day, "auto_desk").executeAsOneOrNull() ?: 0
+        if (used >= w.autoHandoffDailyLimit) return
+        val h = handoff()
+        val preferred = runCatching { app.juiz.core.work.HandoffRoute.valueOf(w.autoRoute) }.getOrNull()
+        val route = preferred?.takeIf { it in h.availableRoutes }
+            ?: h.availableRoutes.firstOrNull { it != app.juiz.core.work.HandoffRoute.MANUAL_SHARE } ?: return
+        kotlinx.coroutines.runBlocking { h.handoff(task.id, route) }
+        db.transaction {
+            db.juizQueries.initCounter(day, "auto_desk")
+            db.juizQueries.incrementCounter(day, "auto_desk")
+        }
+    }
 
     val conversations: ConversationService
         get() = ConversationService(db, clock, archive, consents, memory, settings, executor, errands)
@@ -93,6 +134,9 @@ class JuizCore(
                 baseUrl = p.compatBaseUrl.ifBlank { throw MissingCredential("兼容端点地址") },
                 model = p.compatModel.ifBlank { throw MissingCredential("兼容端点模型名") },
                 apiKey = secrets.get(Secrets.COMPAT),
+                extraBody = kotlinx.serialization.json.buildJsonObject {
+                    if (p.compatReasoningEffort.isNotBlank()) put("reasoning_effort", kotlinx.serialization.json.JsonPrimitive(p.compatReasoningEffort))
+                },
             )
         }
     }
@@ -129,7 +173,11 @@ class JuizCore(
         val w = settings.work()
         val token = secrets.get(Secrets.WORKSPACE_AGENT)
         val client = if (w.triggerId.isNotBlank() && !token.isNullOrBlank()) WorkspaceAgentsClient(token, w.triggerId, w.baseUrl) else null
-        return HandoffService(tasks, client, w.exchangeFolderHint)
+        val openai = secrets.get(Secrets.OPENAI)
+        val cloud = if (w.cloudEnabled && !openai.isNullOrBlank() && cloudDir != null) {
+            app.juiz.core.work.CloudWorker(openai, w.cloudModel, w.cloudEffort.ifBlank { null })
+        } else null
+        return HandoffService(tasks, client, w.exchangeFolderHint, if (w.deskEnabled) exchangeFolder() else null, cloud, cloudDir)
     }
 
     fun smtpConfig(): SmtpConfig =
@@ -155,6 +203,7 @@ class JuizCore(
     fun startupMaintenance() {
         tasks.markInterruptedExecutions()
         conversations.purgeTurnsOlderThan(settings.behavior().transcriptRetentionDays)
+        recordings?.purgeOlderThan(settings.behavior().recordingRetentionDays)
     }
 
     companion object {

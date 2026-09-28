@@ -120,7 +120,7 @@ fun TaskDetailScreen(activity: MainActivity, id: String, back: () -> Unit) {
         val core = JuizApp.core
         val t = core.tasks.get(id)!!
         val h = core.handoff()
-        DetailData(t, core.tasks.actionsForTask(id), h.cardFor(t), h.availableRoutes, Saf.exchangeFolder(ctx) != null)
+        DetailData(t, core.tasks.actionsForTask(id), h.cardFor(t), h.availableRoutes, h.folderFor(t) != null || Saf.exchangeFolder(ctx) != null)
     } ?: return
     val t = d.task
     val err: (String) -> Unit = { message = it }
@@ -150,40 +150,49 @@ fun TaskDetailScreen(activity: MainActivity, id: String, back: () -> Unit) {
             }
         }
         message?.let { m -> item { Text(m, color = c.amber, fontSize = 13.sp, modifier = Modifier.padding(top = 10.dp)) } }
+        // 确认之前先核对：回放那通电话的录音，或翻看短信原文
+        item { OriginalCallSection(activity, t.conversationId) }
 
         item { SectionHeader("handoff", "交给 ChatGPT Work") }
         item {
             JuizCard {
                 when (t.status) {
                     TaskStatus.PENDING_CONFIRMATION -> {
-                        Text("确认这个请求值得办，再交给 Work。交接只携带任务卡里的信息。", color = c.sub, fontSize = 13.sp)
+                        Text("交给执行方做完；任何外发都要等你最后批准。", color = c.sub, fontSize = 13.sp)
+                        t.brief?.let { Text("工作说明：$it", color = c.faint, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)) }
                         Spacer(Modifier.height(10.dp))
-                        if (HandoffRoute.WORKSPACE_AGENT in d.routes) {
-                            PrimaryButton("触发 Workspace Agent", Modifier.fillMaxWidth(), icon = Icons.AutoMirrored.Outlined.Send) {
-                                activity.confirmOwner("确认交给 Work") {
-                                    act(err) {
-                                        when (val r = JuizApp.core.handoff().handoff(id, HandoffRoute.WORKSPACE_AGENT)) {
-                                            is HandoffResult.Failed -> message = r.reason
-                                            is HandoffResult.Triggered -> message = "已触发。代理的回复无法通过接口取回，交付物请写入交换目录。"
-                                            else -> Unit
-                                        }
-                                    }
+                        fun go(route: HandoffRoute) = activity.confirmOwner("确认交给执行方") {
+                            act(err) {
+                                when (val r = JuizApp.core.handoff().handoff(id, route)) {
+                                    is HandoffResult.Failed -> message = r.reason
+                                    is HandoffResult.Triggered -> { message = "已交出，正在跟进进度。"; JuizApp.instance.watchTask(id) }
+                                    is HandoffResult.Queued -> { message = "任务卡已放入交换目录，等电脑上的 juiz-desk 领取。"; JuizApp.instance.watchTask(id) }
+                                    else -> Unit
                                 }
                             }
+                        }
+                        if (HandoffRoute.OPENAI_CLOUD in d.routes) {
+                            PrimaryButton("交给云端大模型（手机直连）", Modifier.fillMaxWidth(), icon = Icons.AutoMirrored.Outlined.Send) { go(HandoffRoute.OPENAI_CLOUD) }
                             Spacer(Modifier.height(8.dp))
                         }
-                        GhostButton("分享任务卡给 ChatGPT（半自动）", Modifier.fillMaxWidth(), icon = Icons.Outlined.Share) {
+                        GhostButton(if (app.juiz.bridge.ChatGptBridge.installed(ctx)) "交给 ChatGPT App（Work 模式）" else "分享给 ChatGPT", Modifier.fillMaxWidth(), icon = Icons.Outlined.Share) {
                             act(err) {
                                 val r = JuizApp.core.handoff().handoff(id, HandoffRoute.MANUAL_SHARE)
-                                if (r is HandoffResult.ShareNeeded) {
-                                    activity.runOnUiThread { ctx.shareText("Juiz 任务卡 ${t.id}", r.cardText); shareConfirm = true }
-                                }
+                                if (r is HandoffResult.ShareNeeded) activity.runOnUiThread { app.juiz.bridge.ChatGptBridge.send(ctx, t.id, r.cardText); shareConfirm = true }
                             }
+                        }
+                        if (HandoffRoute.CODEX_DESK in d.routes) {
+                            Spacer(Modifier.height(8.dp))
+                            GhostButton("交给电脑上的 Codex", Modifier.fillMaxWidth()) { go(HandoffRoute.CODEX_DESK) }
+                        }
+                        if (HandoffRoute.WORKSPACE_AGENT in d.routes) {
+                            Spacer(Modifier.height(8.dp))
+                            GhostButton("触发 Workspace Agent", Modifier.fillMaxWidth()) { go(HandoffRoute.WORKSPACE_AGENT) }
                         }
                         Spacer(Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             GhostButton("本人已处理", Modifier.weight(1f), color = c.mint) { noteDialog = true }
-                            GhostButton("取消", Modifier.weight(1f), color = c.rose) { act(err) { JuizApp.core.tasks.transition(id, TaskStatus.CANCELLED, "主人取消") } }
+                            GhostButton("取消", Modifier.weight(1f), color = c.rose) { act(err) { JuizApp.core.tasks.transition(id, TaskStatus.CANCELLED, "本人取消") } }
                         }
                     }
                     TaskStatus.HANDED_OFF, TaskStatus.IN_PROGRESS, TaskStatus.AWAITING_APPROVAL, TaskStatus.NEEDS_VERIFICATION -> {
@@ -204,17 +213,17 @@ fun TaskDetailScreen(activity: MainActivity, id: String, back: () -> Unit) {
                             if (t.workRunId != null) GhostButton("刷新状态", Modifier.weight(1f)) { act(err) { JuizApp.core.handoff().poll(id) } }
                             PrimaryButton("核验交付物", Modifier.weight(1f), icon = Icons.Outlined.Verified, enabled = d.exchange) {
                                 act(err) {
-                                    val folder = Saf.exchangeFolder(ctx) ?: error("请先在设置里选择交换目录")
+                                    val folder = JuizApp.core.handoff().folderFor(t) ?: Saf.exchangeFolder(ctx) ?: error("没有找到成品所在的目录：请把成品分享给 Juiz 导入，或在设置里选择交换目录")
                                     val r = JuizApp.core.handoff().verify(id, folder)
                                     message = if (r.ok) "核验通过：${r.verified.joinToString()}" else "未通过：${r.issues.joinToString("；")}"
                                 }
                             }
                         }
-                        if (!d.exchange) Text("需要先在「设置 → Work 交接」里选择交换目录", color = c.faint, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
+                        if (!d.exchange) Text("在 ChatGPT App 里把成品分享给 Juiz（选「导入到 Juiz 委托」），就能自动核验", color = c.faint, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
                         Spacer(Modifier.height(8.dp))
                         GhostButton("我已亲自核对，标记完成", Modifier.fillMaxWidth(), color = c.mint) { noteDialog = true }
                     }
-                    TaskStatus.FAILED -> PrimaryButton("重新交接", Modifier.fillMaxWidth()) { act(err) { JuizApp.core.tasks.transition(id, TaskStatus.PENDING_CONFIRMATION, "主人要求重试") } }
+                    TaskStatus.FAILED -> PrimaryButton("重新交接", Modifier.fillMaxWidth()) { act(err) { JuizApp.core.tasks.transition(id, TaskStatus.PENDING_CONFIRMATION, "本人要求重试") } }
                     else -> Text("任务已结束。", color = c.sub, fontSize = 13.sp)
                 }
                 t.verification?.let { v ->
@@ -288,10 +297,27 @@ private fun ActionCard(activity: MainActivity, a: OutboundAction, err: (String) 
         Mono("内容哈希 ${a.contentHash.take(16)}", c.faint, 10, Modifier.padding(top = 4.dp))
         a.receipt?.let { Mono("回执 $it", c.faint, 10) }
         when (a.status) {
-            ActionStatus.PROPOSED -> {
+            ActionStatus.PROPOSED, ActionStatus.APPROVED -> {
                 Spacer(Modifier.height(8.dp))
-                PrimaryButton("核对无误，批准", Modifier.fillMaxWidth(), color = c.amber) {
-                    activity.confirmOwner("批准外发") { act(err) { JuizApp.core.tasks.approve(a.id, a.contentHash) } }
+                PrimaryButton("核对无误，批准并发送", Modifier.fillMaxWidth(), color = c.amber) {
+                    activity.confirmOwner("批准外发") {
+                        act(err) {
+                            val core = JuizApp.core
+                            val mailer = core.mailer() ?: error("还没有配置发信账号（设置 → 深夜代办授权 → 发信账号）")
+                            if (a.status == ActionStatus.PROPOSED) core.tasks.approve(a.id, a.contentHash)
+                            val task = a.taskId?.let { core.tasks.get(it) }
+                            val folder = task?.let { core.handoff().folderFor(it) }
+                            val outcome = core.tasks.execute(a.id) { act ->
+                                val atts = act.content.attachments.map { att ->
+                                    val bytes = folder?.open("${task!!.id}/${att.name}")?.use { it.readBytes() } ?: error("找不到附件 ${att.name}")
+                                    require(app.juiz.core.util.sha256Hex(bytes) == att.sha256) { "附件 ${att.name} 与核验时不一致，已停止发送" }
+                                    app.juiz.core.errand.MailAttachment(att.name.substringAfterLast('/'), bytes, app.juiz.core.errand.ErrandService.mimeFor(att.name))
+                                }
+                                mailer.send(act.target, act.content.subject.orEmpty(), act.content.body, atts)
+                            }
+                            err(outcome.toString())
+                        }
+                    }
                 }
             }
             ActionStatus.UNKNOWN -> {

@@ -70,6 +70,7 @@ private data class HomeData(
     val level: CapabilityLevel?,
     val sync: Int,
     val dialer: Boolean,
+    val permsOk: Boolean,
     val hasModelKey: Boolean,
     val ownerSet: Boolean,
     val pending: Int,
@@ -77,10 +78,12 @@ private data class HomeData(
     val unknownSends: Int,
     val approvals: Int,
     val convos: List<app.juiz.core.conversation.ConversationSummary>,
+    val previews: Map<String, String>,
     val errands: List<app.juiz.core.archive.ArchiveEvent>,
     val digests: List<app.juiz.core.archive.ArchiveEvent>,
     val messages: List<app.juiz.core.archive.ArchiveEvent>,
     val ownerName: String,
+    val addressAs: String,
 )
 
 @Composable
@@ -94,17 +97,20 @@ fun HomeScreen(activity: MainActivity, go: (Route) -> Unit) {
         val dayAgo = System.currentTimeMillis() - 86_400_000L
         HomeData(
             level = probe.level, sync = probe.syncRate, dialer = probe.defaultDialer,
+            permsOk = listOf("contacts", "notify", "sms").all { id -> probe.items.firstOrNull { it.id == id }?.status == app.juiz.platform.ProbeStatus.OK },
             hasModelKey = core.secrets.get(Secrets.OPENAI) != null || core.settings.providers().compatBaseUrl.isNotBlank(),
-            ownerSet = core.settings.ownerProfile().ownerName != "主人",
+            ownerSet = core.settings.ownerProfile().ownerName != "机主",
             pending = core.tasks.withStatus(TaskStatus.PENDING_CONFIRMATION).size,
             verify = core.tasks.withStatus(TaskStatus.NEEDS_VERIFICATION).size,
             unknownSends = core.tasks.actionsWithStatus(ActionStatus.UNKNOWN).size,
             approvals = core.tasks.actionsWithStatus(ActionStatus.PROPOSED).size,
             convos = core.conversations.recent(12),
+            previews = core.tasks.all().let { all -> core.conversations.recent(12).associate { it.id to core.conversations.preview(it, all) } },
             errands = recent.filter { it.type == "errand.file" && it.at > dayAgo },
             digests = recent.filter { it.type == "shield.digest" }.take(5),
             messages = recent.filter { it.type == "message.taken" }.take(8),
             ownerName = core.settings.ownerProfile().ownerName,
+            addressAs = core.settings.ownerProfile().addressAs,
         )
     }
     val calls by CallRegistry.calls.collectAsState()
@@ -135,7 +141,7 @@ fun HomeScreen(activity: MainActivity, go: (Route) -> Unit) {
                     IconButton(onClick = { go(Route.Settings) }) { Icon(Icons.Outlined.Settings, "设置", tint = c.sub) }
                 }
             }
-            if (data != null && (!data.dialer || !data.hasModelKey || !data.ownerSet)) {
+            if (data != null && (!data.dialer || !data.permsOk || !data.hasModelKey || !data.ownerSet)) {
                 item { SetupCard(activity, data, go) }
             }
             item { StatusCard(data, calls.firstOrNull()) }
@@ -199,7 +205,7 @@ fun HomeScreen(activity: MainActivity, go: (Route) -> Unit) {
                             Spacer(Modifier.width(10.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(cv.contactName ?: cv.number, color = c.text, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                                Text(cv.summary ?: "（无事项）", color = c.sub, fontSize = 13.sp, maxLines = 2)
+                                Text(data.previews[cv.id] ?: cv.summary ?: "（无事项）", color = c.sub, fontSize = 13.sp, maxLines = 2)
                             }
                             Mono(fmtTime(cv.startedAt), c.faint, 10)
                         }
@@ -234,8 +240,8 @@ private fun SetupCard(activity: MainActivity, d: HomeData, go: (Route) -> Unit) 
         }
         Column(Modifier.padding(16.dp)) {
             SetupRow("设为默认电话应用", "Juiz 需要负责接听与通话界面", d.dialer) { activity.requestDialerRole() }
-            SetupRow("授予通讯录、通知、短信权限", "区分熟人与陌生号码；短信代办", false, doneLabel = "去授予") { activity.requestPermissions() }
-            SetupRow("填写主人资料", "你的称呼、可对外说明的状态", d.ownerSet) { go(Route.Page("owner")) }
+            SetupRow("授予通讯录、通知、短信权限", "区分熟人与陌生号码；短信代办", d.permsOk, doneLabel = "去授予") { activity.requestPermissions() }
+            SetupRow("填写我的资料", "你的称呼、可对外说明的状态", d.ownerSet) { go(Route.Page("owner")) }
             SetupRow("配置模型与密钥", "OpenAI 或兼容端点（例如本机 ollama）", d.hasModelKey) { go(Route.Page("providers")) }
         }
     }
@@ -258,36 +264,66 @@ private fun SetupRow(title: String, sub: String, done: Boolean, doneLabel: Strin
 @Composable
 private fun StatusCard(d: HomeData?, live: app.juiz.call.CallUi?) {
     val c = J.c
-    val mood = when {
-        live?.aiMode == app.juiz.call.AiMode.SHIELD -> OrbMood.SHIELD
-        live?.escalations?.isNotEmpty() == true -> OrbMood.ALERT
-        live?.voiceState == app.juiz.core.voice.VoiceState.SPEAKING -> OrbMood.SPEAKING
-        live != null -> OrbMood.LISTENING
-        else -> OrbMood.IDLE
+    val liveLine = live?.let {
+        when (it.aiMode) {
+            app.juiz.call.AiMode.AI_VOICE -> "我正在接听${it.caller.displayName ?: it.caller.number}的电话，你随时可以接管。"
+            app.juiz.call.AiMode.SHIELD -> "难听的话我挡住了，你只看要点就好。"
+            else -> null
+        }
     }
+    val ctx = BuddyContext(
+        hour = java.time.LocalTime.now().hour,
+        pendingTasks = d?.pending ?: 0,
+        needsVerify = d?.verify ?: 0,
+        errandsLastNight = d?.errands?.size ?: 0,
+        recentDigest = d?.digests?.any { System.currentTimeMillis() - it.at < 3 * 3_600_000L } == true,
+        dialerReady = d?.dialer ?: true,
+        liveCall = liveLine,
+        ownerName = d?.ownerName.orEmpty(),
+        addressAs = d?.addressAs ?: "伙伴",
+    )
+    val brain = remember { runCatching { app.juiz.core.buddy.BuddyBrain(JuizApp.core.chatModel()) }.getOrNull() }
+    var chat by remember { mutableStateOf("") }
+    var sent by remember { mutableStateOf<String?>(null) }
     JuizCard(Modifier.padding(top = 12.dp), accent = c.sora) {
         Box(Modifier.fillMaxWidth()) {
-            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                Orb(mood, onLongPressTuft = {})
-                Text(
-                    when {
-                        live != null -> "${live.caller.displayName ?: live.caller.number} · ${live.stateLabel}"
-                        d?.level == null -> "尚未接管来电"
-                        else -> "待命中"
-                    },
-                    color = c.text, fontSize = 17.sp, fontWeight = FontWeight.Medium,
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    when (d?.level) {
-                        CapabilityLevel.L1_PRIVILEGED_VOICE -> "L1 语音代接 · 本机已通过真机验证"
-                        CapabilityLevel.L0_STANDARD -> "L0 标准模式 · 规则接听 + 短信代办"
-                        null -> "设为默认电话应用后开始工作"
-                    },
-                    color = c.sub, fontSize = 13.sp,
-                )
-            }
+            if (d != null) JuizBuddy(ctx, height = 156.dp, brain = brain, chatText = sent)
             if (d != null) Mono("SYNC ${d.sync}%", c.faint, 9, Modifier.align(Alignment.TopEnd))
+        }
+        if (brain != null) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                androidx.compose.foundation.text.BasicTextField(
+                    chat, { chat = it }, singleLine = true,
+                    textStyle = androidx.compose.ui.text.TextStyle(color = c.text, fontSize = 14.sp),
+                    cursorBrush = androidx.compose.ui.graphics.SolidColor(c.sora),
+                    modifier = Modifier.weight(1f).clip(RoundedCornerShape(12.dp)).background(c.surfaceHi).padding(horizontal = 12.dp, vertical = 10.dp),
+                    decorationBox = { inner -> if (chat.isEmpty()) Text("和 Juiz 说句话…", color = c.faint, fontSize = 14.sp); inner() },
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("说", color = if (chat.isBlank()) c.faint else c.sora, fontSize = 15.sp, modifier = Modifier.clickable(enabled = chat.isNotBlank()) { sent = chat.trim(); chat = "" }.padding(8.dp))
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusDot(if (live != null) c.amber else if (d?.level != null) c.mint else c.faint, pulse = live != null)
+            Spacer(Modifier.width(6.dp))
+            Text(
+                when {
+                    live != null -> "${live.caller.displayName ?: live.caller.number} · ${live.stateLabel}"
+                    d?.level == null -> "尚未接管来电"
+                    else -> "待命中"
+                },
+                color = c.text, fontSize = 15.sp, fontWeight = FontWeight.Medium,
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                when (d?.level) {
+                    CapabilityLevel.L1_PRIVILEGED_VOICE -> "L1 语音代接"
+                    CapabilityLevel.L0_STANDARD -> "L0 规则接听 + 短信代办"
+                    null -> "未设为默认电话"
+                },
+                color = c.sub, fontSize = 12.sp,
+            )
         }
     }
 }

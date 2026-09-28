@@ -78,10 +78,10 @@ class WorkPollWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
         val core = JuizApp.core
         val handoff = core.handoff()
         val active = core.tasks.withStatus(TaskStatus.HANDED_OFF, TaskStatus.IN_PROGRESS, TaskStatus.AWAITING_APPROVAL, TaskStatus.NEEDS_VERIFICATION)
-        val folder = Saf.exchangeFolder(applicationContext)
         for (t in active) {
             runCatching { handoff.poll(t.id) }
             val cur = core.tasks.get(t.id) ?: continue
+            val folder = handoff.folderFor(cur) ?: Saf.exchangeFolder(applicationContext)
             if (folder != null && cur.status == TaskStatus.NEEDS_VERIFICATION) {
                 val r = handoff.verify(t.id, folder)
                 if (r.ok) Notifications.simple(applicationContext, JuizApp.CH_TASKS, Notifications.ID_TASKS, "任务已完成并核验", "${t.id}「${t.title}」：${r.verified.joinToString()}")

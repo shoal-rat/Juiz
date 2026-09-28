@@ -11,7 +11,17 @@ import java.security.MessageDigest
 data class DeliverableEntry(val path: String, val sha256: String, val bytes: Long)
 
 @Serializable
-data class ActionEntry(val type: String, val target: String? = null, val state: String? = null, val receipt: String? = null)
+data class ActionEntry(
+    val type: String,
+    val target: String? = null,
+    val state: String? = null,
+    val receipt: String? = null,
+    /** email_draft：执行方写好的邮件草稿，需本人批准后由手机发出。 */
+    val subject: String? = null,
+    val body: String? = null,
+    /** 附件为交付物里的路径（相对任务目录），哈希以 deliverables 为准。 */
+    val attachments: List<String> = emptyList(),
+)
 
 @Serializable
 data class ResultManifest(
@@ -31,12 +41,17 @@ data class VerificationReport(
     val verified: List<String>,
     val summary: String? = null,
     val reportedStatus: String? = null,
+    val drafts: List<ActionEntry> = emptyList(),
+    val deliverables: List<DeliverableEntry> = emptyList(),
 )
 
 /** 交换目录：Android 上由 SAF 授权的目录实现，桌面/测试用本地目录。 */
 interface ExchangeFolder {
     fun readText(relPath: String): String?
     fun open(relPath: String): InputStream?
+    /** 写入文件（自动创建上级目录）。只读实现返回 false。 */
+    fun write(relPath: String, bytes: ByteArray): Boolean = false
+    fun exists(relPath: String): Boolean = open(relPath)?.use { true } ?: false
 }
 
 class LocalExchangeFolder(private val root: File) : ExchangeFolder {
@@ -46,6 +61,13 @@ class LocalExchangeFolder(private val root: File) : ExchangeFolder {
     }
     override fun readText(relPath: String): String? = resolve(relPath)?.takeIf { it.isFile }?.readText()
     override fun open(relPath: String): InputStream? = resolve(relPath)?.takeIf { it.isFile }?.inputStream()
+    override fun write(relPath: String, bytes: ByteArray): Boolean {
+        val f = resolve(relPath) ?: return false
+        f.parentFile?.mkdirs()
+        val tmp = java.io.File(f.parentFile, f.name + ".tmp")
+        tmp.writeBytes(bytes)
+        return tmp.renameTo(f)
+    }
 }
 
 /**
@@ -85,7 +107,10 @@ object ResultVerifier {
                 else -> verified += d.path
             }
         }
-        return VerificationReport(issues.isEmpty(), true, issues, verified, m.summary, m.status)
+        // 草稿附件必须是已核验的交付物
+        val drafts = m.actions.filter { it.type == "email_draft" && !it.target.isNullOrBlank() }
+        drafts.forEach { d -> d.attachments.filter { it !in verified }.forEach { issues += "草稿附件「$it」不在已核验的交付物里" } }
+        return VerificationReport(issues.isEmpty(), true, issues, verified, m.summary, m.status, drafts, m.deliverables)
     }
 
     fun hashAndSize(input: InputStream): Pair<String, Long> {

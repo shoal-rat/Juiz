@@ -3,6 +3,10 @@ package app.juiz.core.voice
 import app.juiz.core.detox.DetoxLine
 import app.juiz.core.detox.DetoxRewriter
 import app.juiz.core.detox.LexiconFilter
+import app.juiz.core.detox.ReplyOption
+import app.juiz.core.detox.ReplySuggester
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.channels.Channel
@@ -35,6 +39,10 @@ interface ShieldListener {
     fun onCaption(caption: Caption) {}
     fun onOwnerLine(text: String) {}
     fun onIntensity(level: Int) {}
+    /** 针对某句字幕准备好的回复选项（选句代答）。 */
+    fun onSuggestions(captionId: Int, options: List<ReplyOption>) {}
+    /** 选定的回复已经说给对方。 */
+    fun onSpoken(text: String) {}
 }
 
 data class ShieldConfig(
@@ -43,6 +51,11 @@ data class ShieldConfig(
     val limiterTargetRms: Double = 1800.0,
     val transcribeOwner: Boolean = true,
     val vad: VadConfig = VadConfig(endSilenceMs = 700),
+    /**
+     * 第一次用合成声音替本人说话前的一句说明。说的内容都是本人选定的，但声音是合成的：
+     * 语音供应商条款与《人工智能生成合成内容标识办法》都要求标识合成语音。
+     */
+    val voiceAssistNotice: String = "我这边现在不方便说话，用语音助手回复您。",
 )
 
 /**
@@ -51,6 +64,8 @@ data class ShieldConfig(
  *   对方声音 → 压低/削峰/静音 → 本人听筒
  *            → 转写 → 词表过滤（立即字幕）→ 模型改写（替换字幕，可选平静复述）
  *   本人麦克风 → 原样送入通话
+ * 选句代答：本人不开口，从 Juiz 准备的回复里选一句（或自己输入），由合成声音说给对方；
+ *   第一次使用时先说一句"用语音助手回复"的说明。每句话都是本人选的，Juiz 不替本人决定。
  * 原始转写只留在会话内存里，只有本人主动点"查看原话"才显示。
  */
 class ShieldSession(
@@ -61,7 +76,16 @@ class ShieldSession(
     private val calmTts: TextToSpeech?,
     private val listener: ShieldListener,
     private val config: ShieldConfig = ShieldConfig(),
+    /** 替本人说话用的声音（授权后可以是本人克隆音色）。 */
+    private val replyTts: TextToSpeech? = null,
+    private val suggester: ReplySuggester? = null,
 ) {
+    /** false 时本人麦克风不送入通话（选句代答模式）。 */
+    @Volatile var ownerMicLive: Boolean = true
+    @Volatile private var speakingForOwner = false
+    @Volatile private var noticeGiven = false
+    private val sayLock = Mutex()
+
     @Volatile var mode: ShieldMode = ShieldMode.QUIET_WITH_CAPTIONS
         set(value) {
             field = value
@@ -99,15 +123,19 @@ class ShieldSession(
         val toStt = ownerStt?.let { StreamingResampler(owner.micRate, it.sampleRate) }
         val vad = EnergyVad(owner.micRate, config.vad)
         owner.mic().collect { frame ->
-            call.play(toCall.process(frame))
-            if (ownerStt != null && toStt != null) {
+            val pcm = toCall.process(frame)
+            if (ownerMicLive && !speakingForOwner) call.play(pcm)
+            if (ownerMicLive && ownerStt != null && toStt != null) {
                 when (vad.process(frame)) {
                     VadEvent.SPEECH_START, null -> if (vad.inSpeech) ownerStt.append(toStt.process(frame))
-                    VadEvent.SPEECH_END -> if (vad.lastWasMeaningful) launch {
-                        val text = runCatching { ownerStt.commit() }.getOrDefault("").trim()
+                    VadEvent.SPEECH_END -> if (vad.lastWasMeaningful) {
+                        val pending = ownerStt.commit()
+                        launch {
+                        val text = runCatching { kotlinx.coroutines.withTimeout(4000) { pending.await() } }.getOrDefault("").trim()
                         if (text.isNotEmpty()) {
                             transcript += "owner" to text
                             listener.onOwnerLine(text)
+                        }
                         }
                     } else ownerStt.clear()
                 }
@@ -120,20 +148,43 @@ class ShieldSession(
         val toStt = StreamingResampler(call.captureRate, session.sampleRate)
         val vad = EnergyVad(call.captureRate, config.vad)
         val preRoll = PreRoll(call.captureRate * 300 / 1000)
-        call.captured().collect { frame ->
+        // 片段拼成整句再去情绪：半句话既不好转述，也容易被误判
+        val joiner = UtteranceJoiner(this, { vad.inSpeech }) { text, _ -> processCaption(text, ear) }
+        val agc = Agc()
+        call.captured().collect { raw ->
             when (mode) {
-                ShieldMode.PASSTHROUGH -> ear.trySend(toEar.process(frame))
-                ShieldMode.QUIET_WITH_CAPTIONS -> ear.trySend(toEar.process(limit(frame, config.quietGain)))
+                ShieldMode.PASSTHROUGH -> ear.trySend(toEar.process(raw))
+                ShieldMode.QUIET_WITH_CAPTIONS -> ear.trySend(toEar.process(limit(raw, config.quietGain)))
                 ShieldMode.CALM_VOICE -> Unit
             }
+            val frame = agc.process(raw)
             val was = vad.inSpeech
             when (vad.process(frame)) {
                 VadEvent.SPEECH_START -> {
+                    joiner.callerResumed()
                     preRoll.drain().forEach { session.append(toStt.process(it)) }
                     session.append(toStt.process(frame))
                 }
                 VadEvent.SPEECH_END -> {
-                    if (vad.lastWasMeaningful) launch { finishUtterance(session, ear) } else session.clear()
+                    val endedAt = System.currentTimeMillis()
+                    if (vad.lastWasMeaningful) {
+                        val pending = session.commit() // 此刻同步封口
+                        launch {
+                            val raw = try {
+                                kotlinx.coroutines.withTimeout(6000) { pending.await() }.trim()
+                            } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
+                                ""
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                ""
+                            }
+                            if (raw.isNotEmpty()) joiner.add(raw, endedAt) else joiner.resume()
+                        }
+                    } else {
+                        session.clear()
+                        joiner.resume()
+                    }
                     toStt.reset()
                 }
                 null -> if (vad.inSpeech) session.append(toStt.process(frame)) else if (!was) preRoll.add(frame)
@@ -141,14 +192,7 @@ class ShieldSession(
         }
     }
 
-    private suspend fun finishUtterance(session: SttSession, ear: Channel<ShortArray>) {
-        val raw = try {
-            session.commit().trim()
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            ""
-        }
+    private suspend fun processCaption(raw: String, ear: Channel<ShortArray>) {
         if (raw.isEmpty()) return
         val id = synchronized(this) { nextId++ }
         rawById[id] = raw
@@ -160,10 +204,39 @@ class ShieldSession(
             listener.onCaption(Caption(id, it, final = true))
             listener.onIntensity(it.intensity)
         } ?: quick
+        if (suggester != null) {
+            val options = suggester.suggest(line, transcriptSnapshot())
+            listener.onSuggestions(id, options)
+        }
         val tts = calmTts
         if (mode == ShieldMode.CALM_VOICE && tts != null && line.calm.isNotBlank()) {
             val toEar = StreamingResampler(tts.sampleRate, owner.earRate)
             runCatching { tts.synthesize(line.calm).collect { ear.send(toEar.process(it)) } }
+        }
+    }
+
+    /**
+     * 用合成声音把本人选定的一句话说给对方。第一次调用时先说明"用语音助手回复"。
+     * 说话期间本人麦克风暂不送入通话，避免两路声音叠在一起。
+     */
+    suspend fun say(text: String) {
+        val tts = replyTts ?: calmTts ?: throw IllegalStateException("没有可用的语音合成")
+        val line = text.trim()
+        if (line.isEmpty()) return
+        sayLock.withLock {
+            speakingForOwner = true
+            try {
+                val toCall = StreamingResampler(tts.sampleRate, call.playbackRate)
+                if (!noticeGiven) {
+                    noticeGiven = true
+                    tts.synthesize(config.voiceAssistNotice).collect { call.play(toCall.process(it)) }
+                }
+                tts.synthesize(line).collect { call.play(toCall.process(it)) }
+                transcript += "owner" to line
+                listener.onSpoken(line)
+            } finally {
+                speakingForOwner = false
+            }
         }
     }
 

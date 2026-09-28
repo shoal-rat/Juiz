@@ -69,14 +69,23 @@ class ValidationRunner(private val ctx: Context) {
         prompt("来电已检测到。点「进入后台处理」——对方会感觉电话被接起，但本机听筒和麦克风不接入。")
     }
 
+    private var mutedPath = false
+
     fun enterProcessing() = CallController.scope.launch(Dispatchers.Default) {
         val c = call ?: return@launch
-        prompt("正在进入后台音频处理…", busy = true)
+        val am = ctx.getSystemService(android.media.AudioManager::class.java)
+        mutedPath = !SystemCallApi.screeningModeSupported(am)
+        prompt(if (mutedPath) "本机不支持来电筛选模式：改为接听并静音本机麦克风…" else "正在进入后台音频处理…", busy = true)
         val ok = runCatching {
-            withContext(Dispatchers.Main) { SystemCallApi.enterBackgroundAudioProcessing(c) }
-            awaitState(c, SystemCallApi.STATE_AUDIO_PROCESSING, 4000)
+            if (mutedPath) {
+                withContext(Dispatchers.Main) { c.answer(VideoProfile.STATE_AUDIO_ONLY); CallRegistry.service?.setMuted(true) }
+                awaitState(c, Call.STATE_ACTIVE, 6000).also { withContext(Dispatchers.Main) { CallRegistry.service?.setMuted(true) } }
+            } else {
+                withContext(Dispatchers.Main) { SystemCallApi.enterBackgroundAudioProcessing(c) }
+                awaitState(c, SystemCallApi.STATE_AUDIO_PROCESSING, 4000)
+            }
         }.getOrElse { e -> prompt("失败：${e.message}"); false }
-        mark("enter_processing", ok, "state=${c.currentState}")
+        mark("enter_processing", ok, "state=${c.currentState}" + if (mutedPath) "（接听+静音路径）" else "（后台音频处理路径）")
         if (!ok) return@launch
         port = runCatching { PrivilegedCallAudioPort.open(ctx) }.getOrElse { e ->
             mark("downlink", false, e.message)
@@ -116,7 +125,11 @@ class ValidationRunner(private val ctx: Context) {
             val c = call ?: return@launch
             port?.release()
             port = null
-            if (c.currentState == SystemCallApi.STATE_AUDIO_PROCESSING) {
+            if (mutedPath && c.currentState == Call.STATE_ACTIVE) {
+                withContext(Dispatchers.Main) { CallRegistry.service?.setMuted(false) }
+                mark("takeover", null, "已取消静音（接听+静音路径）")
+                prompt("已取消静音。请和对方确认：双方都能正常听到吗？测试音听到了吗？")
+            } else if (c.currentState == SystemCallApi.STATE_AUDIO_PROCESSING) {
                 withContext(Dispatchers.Main) { SystemCallApi.exitBackgroundAudioProcessing(c, false) }
                 val ok = awaitState(c, Call.STATE_ACTIVE, 4000)
                 mark("takeover", if (ok) null else false, "state=${c.currentState}")

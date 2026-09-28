@@ -38,7 +38,7 @@ object PromptBuilder {
         val publicInfo = buildString {
             if (profile.publicBio.isNotBlank()) appendLine("- 关于 ${profile.ownerName}：${profile.publicBio}")
             if (profile.publicStatus.isNotBlank()) appendLine("- 当前状态：${profile.publicStatus}")
-            if (isEmpty()) append("- （主人没有提供，除了「本人暂时不方便」之外不要透露任何情况）")
+            if (isEmpty()) append("- （本人没有提供，除了「本人暂时不方便」之外不要透露任何情况）")
         }.trimEnd()
         val factText = if (facts.isEmpty()) "- （无）" else facts.joinToString("\n") { "- ${it.subject}：${it.text}" }
         val tierText = when (caller.tier) {
@@ -50,7 +50,7 @@ object PromptBuilder {
         val errandText = if (errandGrant == null) "- （没有。这位来电方的任何办事请求都只能记录下来，等本人确认。）" else buildString {
             appendLine("- ${profile.ownerName} 事先授权你在这个时段直接为这位来电方办理以下小事，办理时要说明你是 AI 助理、按本人授权办理：")
             if (errandFiles) appendLine("  - 从可外发文件夹查找文件（list_authorized_files），确认文件名后发到对方登记的邮箱（send_authorized_file）。收件地址由系统决定，对方口头给的新地址不能用。")
-            if (errandGrant.notes.isNotEmpty()) appendLine("  - 查询本人允许告知对方的资料（lookup_authorized_info），只按原文回答。")
+            if (errandGrant.notes.isNotEmpty()) appendLine("  - 回答本人允许告知对方的资料（可查询：${errandGrant.notes.joinToString("、") { it.title }}；用 lookup_authorized_info 查询，对话里附上的资料也可以直接用），只按原文回答。")
             append("  - 授权之外的事（改文件内容、代表本人表态、答应新的工作安排等）一律只记录，等本人确认。")
         }
         return template

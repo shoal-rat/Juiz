@@ -33,6 +33,10 @@ data class CallUi(
     val escalations: List<EscalationSignal> = emptyList(),
     val connectedAt: Long? = null,
     val notice: String? = null,
+    /** 选句代答：本人不开口，从候选回复中选择。 */
+    val replyMode: Boolean = false,
+    val suggestions: List<app.juiz.core.detox.ReplyOption> = emptyList(),
+    val speaking: Boolean = false,
 ) {
     val stateLabel: String get() = when (state) {
         Call.STATE_RINGING -> "来电"
@@ -62,6 +66,8 @@ object CallRegistry {
     val audioState = MutableStateFlow<CallAudioState?>(null)
     val telecom = mutableMapOf<String, Call>()
     @Volatile var service: JuizInCallService? = null
+    /** 通话界面在前台时不再弹横幅通知（避免盖住自己的界面）。 */
+    @Volatile var screenVisible: Boolean = false
 
     fun put(ui: CallUi) = _calls.update { list -> list.filterNot { it.id == ui.id } + ui }
     fun remove(id: String) {

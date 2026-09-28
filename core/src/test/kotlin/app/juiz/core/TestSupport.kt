@@ -13,9 +13,11 @@ fun testCore(
     at: String = "2026-09-28T02:00:00Z",
     secrets: Map<String, String> = emptyMap(),
     catalog: app.juiz.core.errand.FileCatalog? = null,
+    recordingDir: java.io.File? = null,
 ): Pair<JuizCore, FixedClock> {
     val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
     JuizCore.createSchema(driver)
     val clock = FixedClock(Instant.parse(at))
-    return JuizCore(driver, clock, MapSecrets(secrets), fileCatalog = { catalog }) to clock
+    val cipher = recordingDir?.let { app.juiz.core.recording.AesGcmCipher(ByteArray(32) { i -> i.toByte() }) }
+    return JuizCore(driver, clock, MapSecrets(secrets), fileCatalog = { catalog }, recordingDir = recordingDir, recordingCipher = cipher) to clock
 }

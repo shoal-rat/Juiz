@@ -37,6 +37,8 @@ data class Expectation(
     /** 所有发出的邮件都必须在这个名单里（可以一封都不发）。 */
     val mail_to: List<String>? = null,
     val mail_count: Int? = null,
+    /** 第 n 轮结束时还不能有任务（关键信息要等对方确认后才能落成任务）。 */
+    val no_task_after_turn: Int? = null,
 )
 
 @Serializable
@@ -65,23 +67,44 @@ data class CheckResult(val scenario: String, val check: String, val ok: Boolean,
  * 用真实模型（openai / compat）时才是在检验"模型 + 规则"的整体行为。两者都不是真机验收。
  */
 object Scenarios {
-    fun load(): List<Scenario> {
-        val text = Scenarios::class.java.getResourceAsStream("/scenarios/scenarios.json")!!.bufferedReader().readText()
+    /**
+     * dev：调提示词时反复使用的场景；test：留出的测试集，措辞和情境都不同，
+     * 只在调好之后跑一次用来报告，不根据它的失败项去改提示词。
+     */
+    fun load(set: String = "dev"): List<Scenario> {
+        val file = if (set == "test") "/scenarios/test_heldout.json" else "/scenarios/scenarios.json"
+        val text = Scenarios::class.java.getResourceAsStream(file)!!.bufferedReader().readText()
         return JuizJson.decodeFromString(ListSerializer(Scenario.serializer()), text)
     }
 
     suspend fun run(args: Args): Int {
         val choice = args.modelChoice()
         val only = args["only"]
-        val scenarios = load().filter { only == null || it.id == only }
-        println(Ansi.bold("Juiz 场景评测 · 模型：${choice.kind}${choice.model?.let { " ($it)" } ?: ""} · ${scenarios.size} 个场景"))
+        val set = args["set"] ?: "dev"
+        val scenarios = load(set).filter { only == null || it.id == only }
+        println(Ansi.bold("Juiz 场景评测 · ${if (set == "test") "留出测试集" else "开发集"} · 模型：${choice.kind}${choice.model?.let { " ($it)" } ?: ""} · ${scenarios.size} 个场景"))
         if (choice.kind == "scripted") println(Ansi.dim("scripted 模式：模型回复由脚本给出，只检验代码层规则，不代表真实模型表现。"))
+        val repeat = (args["repeat"]?.toIntOrNull() ?: 1).coerceIn(1, 10)
         val results = mutableListOf<CheckResult>()
-        for (s in scenarios) results += runOne(s, args)
+        val perRun = mutableListOf<Pair<Int, Int>>()
+        repeat(repeat) { r ->
+            if (repeat > 1) println(Ansi.bold("\n════ 第 ${r + 1}/$repeat 轮 ════"))
+            val before = results.size
+            for (s in scenarios) results += runOne(s, args)
+            val run = results.subList(before, results.size)
+            perRun += run.count { it.ok } to run.size
+        }
         val passed = results.count { it.ok }
         println()
-        println(Ansi.bold("合计：$passed/${results.size} 项检查通过"))
-        val report = File(SimEnv.dataDir, "eval-${choice.kind}-${System.currentTimeMillis()}.json")
+        if (repeat > 1) println(Ansi.bold("各轮：" + perRun.joinToString("  ") { "${it.first}/${it.second}" }))
+        println(Ansi.bold("合计：$passed/${results.size} 项检查通过（${"%.1f".format(passed * 100.0 / results.size)}%）"))
+        // 按检查项汇总不稳定项
+        val flaky = results.groupBy { it.scenario + " · " + it.check }.filter { (_, v) -> v.any { !it.ok } }
+        if (flaky.isNotEmpty()) {
+            println(Ansi.bold("未全部通过的检查："))
+            flaky.forEach { (k, v) -> println("  ${v.count { it.ok }}/${v.size}  $k") }
+        }
+        val report = File(SimEnv.dataDir, "eval-$set-${choice.kind}-${System.currentTimeMillis()}.json")
         report.parentFile.mkdirs()
         report.writeText(results.joinToString(",\n", "[\n", "\n]") {
             """  {"scenario":"${it.scenario}","check":${JuizJson.encodeToString(kotlinx.serialization.serializer<String>(), it.check)},"ok":${it.ok},"detail":${JuizJson.encodeToString(kotlinx.serialization.serializer<String>(), it.detail)}}"""
@@ -127,6 +150,7 @@ object Scenarios {
         println(Ansi.bold("▌${s.id} · ${s.title}"))
         println(Ansi.cyan("  Juiz ▸ ") + greeting)
         val speech = StringBuilder()
+        val tasksAfterTurn = mutableListOf<Int>()
         for (turn in s.turns) {
             println(Ansi.bold("  来电 ▸ ") + turn)
             val said = StringBuilder()
@@ -135,6 +159,7 @@ object Scenarios {
                 if (o is EngineOutput.Speech) said.append(o.text)
             }
             speech.append(said).append('\n')
+            tasksAfterTurn += core.tasks.all().count { it.kind != TaskKind.CALLBACK && it.contactNumber == s.number && !s.pending_verification_task }
             println(Ansi.cyan("  Juiz ▸ ") + said)
             if (engine.context.ended) break
         }
@@ -154,6 +179,7 @@ object Scenarios {
             val idx = e.tool_order.map { okCalls.indexOf(it) }
             check("工具顺序 ${e.tool_order.joinToString(" → ")}", idx.none { it < 0 } && idx == idx.sorted(), "实际：$allCalls")
         }
+        e.no_task_after_turn?.let { n -> check("第 $n 轮（确认前）没有创建任务", (tasksAfterTurn.getOrNull(n - 1) ?: 0) == 0, "各轮后任务数 $tasksAfterTurn") }
         e.tasks_created?.let { n ->
             val created = outputs.count { it is EngineOutput.TaskCreated && it.task.kind != TaskKind.CALLBACK }
             check("创建任务数 = $n", created == n, "实际 $created")

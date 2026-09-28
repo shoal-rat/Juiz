@@ -10,3 +10,14 @@ captures/
 /sim-data/
 *.keystore
 *.jks
+# 宣传片：成片与中间产物（压缩后的成片在 media/）
+promo/*.mp4
+promo/*.wav
+promo/preview/
+promo/__pycache__/
+promo/voice/*.take*.wav
+promo/voice/*.log
+promo/runninghub/clips/
+promo/runninghub/audio/
+promo/runninghub/*.jpg
+__pycache__/

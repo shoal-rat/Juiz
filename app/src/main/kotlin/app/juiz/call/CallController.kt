@@ -59,7 +59,7 @@ object CallController {
             decideAndSchedule(id, call, caller)
         }
         refreshNotification(id)
-        showCallScreen()
+        if (!incoming) showCallScreen()
     }
 
     fun onCallRemoved(service: InCallService, call: Call) {
@@ -180,6 +180,26 @@ object CallController {
         if (shieldRunners[id] != null) shieldRunners[id]?.stop() else startShield(id)
     }
 
+    /** 选句代答开关：开启后本人麦克风不送入通话，由选定的回复代为发声。 */
+    fun setReplyMode(id: String, on: Boolean) {
+        shieldRunners[id]?.setOwnerMic(!on)
+        CallRegistry.update(id) { it.copy(replyMode = on) }
+    }
+
+    fun sayReply(id: String, text: String) {
+        val runner = shieldRunners[id] ?: return
+        CallRegistry.update(id) { it.copy(speaking = true, suggestions = emptyList()) }
+        scope.launch(Dispatchers.Default) {
+            try {
+                runner.say(text)
+            } catch (e: Exception) {
+                CallRegistry.update(id) { it.copy(notice = "没能说出去：${e.message}") }
+            } finally {
+                CallRegistry.update(id) { it.copy(speaking = false) }
+            }
+        }
+    }
+
     fun setShieldMode(id: String, mode: ShieldMode) {
         shieldRunners[id]?.setMode(mode)
         CallRegistry.update(id) { it.copy(shieldMode = mode) }
@@ -188,14 +208,7 @@ object CallController {
     // ---------- 代接与滤网 ----------
 
     private fun goForeground(id: String) {
-        val svc = CallRegistry.service ?: return
-        val ui = CallRegistry.get(id) ?: return
-        runCatching {
-            svc.startForeground(
-                Notifications.ID_CALL, Notifications.ongoing(appContext, ui),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
-            )
-        }
+        CallRegistry.get(id)?.let { goForegroundFor(it) }
     }
 
     private fun startAi(id: String) {
@@ -245,9 +258,28 @@ object CallController {
     fun refreshNotification(id: String) {
         val ui = CallRegistry.get(id) ?: return
         val nm = appContext.getSystemService(NotificationManager::class.java)
-        val n = if (ui.state == Call.STATE_RINGING || ui.state == 13) Notifications.incoming(appContext, ui) else Notifications.ongoing(appContext, ui)
-        nm.notify(Notifications.ID_CALL, n)
+        if (ui.state == Call.STATE_DISCONNECTED || ui.state == Call.STATE_DISCONNECTING) return
+        val ringing = ui.state == Call.STATE_RINGING || ui.state == 13
+        runCatching {
+            if (ringing && !CallRegistry.screenVisible) {
+                nm.notify(Notifications.ID_CALL, Notifications.incoming(appContext, ui))
+            } else if (!ringing && goForegroundFor(ui)) {
+                Unit // 前台服务已带上 CallStyle 常驻通知
+            } else {
+                nm.notify(Notifications.ID_CALL, Notifications.ongoing(appContext, ui))
+            }
+        }
     }
+
+    /** 通话接通后让 InCallService 进入前台（phoneCall 类型，默认拨号应用可用）；AI/滤网时再加麦克风类型。 */
+    private fun goForegroundFor(ui: CallUi): Boolean {
+        val svc = CallRegistry.service ?: return false
+        val type = if (ui.aiMode == AiMode.NONE) ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+        else ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        return runCatching { svc.startForeground(Notifications.ID_CALL, Notifications.ongoing(appContext, ui, callStyle = true), type); true }.getOrDefault(false)
+    }
+
+    fun refreshAll() = CallRegistry.calls.value.forEach { refreshNotification(it.id) }
 
     fun showCallScreen() {
         runCatching {

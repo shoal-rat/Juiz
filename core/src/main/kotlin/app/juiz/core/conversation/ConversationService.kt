@@ -65,7 +65,7 @@ class ConversationService(
                 put("notes", grant.notes.size)
             }
         }
-        val ctx = ConversationContext(id, caller, channel, grant, files)
+        val ctx = ConversationContext(id, caller, channel, grant, files, settings.ownerProfile().ownerName)
         val prompt = PromptBuilder.system(settings.ownerProfile(), caller, channel, memory.shareableInCalls(), grant, files)
         return ConversationEngine(model, executor, ctx, prompt, recorderFor(id))
     }
@@ -74,7 +74,7 @@ class ConversationService(
     fun resume(conversationId: String, caller: CallerInfo, channel: Channel, model: ChatModel): ConversationEngine {
         val grant = if (caller.tier == app.juiz.core.model.ContactTier.SPAM) null else errands?.activeGrant(caller.number)
         val files = grant != null && errands!!.canSendFiles(grant)
-        val ctx = ConversationContext(conversationId, caller, channel, grant, files)
+        val ctx = ConversationContext(conversationId, caller, channel, grant, files, settings.ownerProfile().ownerName)
         val prompt = PromptBuilder.system(settings.ownerProfile(), caller, channel, memory.shareableInCalls(), grant, files)
         return ConversationEngine(model, executor, ctx, prompt, recorderFor(conversationId)).also { engine ->
             engine.seed(turns(conversationId).map { it.speaker to it.text })
@@ -107,6 +107,22 @@ class ConversationService(
         ConversationSummary(it.id, Channel.valueOf(it.channel), it.number, it.contact_name, it.started_at, it.ended_at, it.mode, it.outcome, it.summary)
     }
 
+    /**
+     * 列表里显示的一句话。结束的会话用摘要；短信窗口要开 24 小时，没结束之前摘要是空的，
+     * 这时显示对方的第一句话和已经建好的委托，而不是"（无事项）"。
+     */
+    fun preview(c: ConversationSummary, tasks: List<app.juiz.core.model.Task>): String {
+        c.summary?.takeIf { it.isNotBlank() }?.let { return it }
+        val mine = tasks.filter { it.conversationId == c.id }
+        val firstAsk = turns(c.id).firstOrNull { it.speaker == "caller" }?.text?.replace(Regex("\\s+"), " ")
+        val parts = buildList {
+            if (c.endedAt == null) add(if (c.channel == Channel.SMS) "短信往来中" else "通话中")
+            mine.firstOrNull()?.let { add("已建委托：${it.title}") }
+            if (mine.isEmpty()) firstAsk?.let { add("对方：" + it.take(36) + if (it.length > 36) "…" else "") }
+        }
+        return parts.joinToString(" · ").ifEmpty { "（无事项）" }
+    }
+
     fun turns(conversationId: String): List<TurnRow> =
         q.selectTurns(conversationId).executeAsList().map { TurnRow(it.at, it.speaker, it.text) }
 
@@ -122,7 +138,7 @@ class ConversationService(
             when (o) {
                 is EngineOutput.TaskCreated -> parts += "创建任务 ${o.task.id}「${o.task.title}」"
                 is EngineOutput.MessageTaken -> parts += "留言：${o.summary}"
-                is EngineOutput.Escalation -> parts += "通知主人：${o.signal.reason.zh}"
+                is EngineOutput.Escalation -> parts += "通知本人：${o.signal.reason.zh}"
                 is EngineOutput.SpamMarked -> parts += "标记骚扰"
                 else -> Unit
             }
