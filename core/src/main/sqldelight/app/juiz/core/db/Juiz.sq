@@ -1,0 +1,264 @@
+-- Juiz 本地数据库。时间一律为 epoch 毫秒。
+
+CREATE TABLE task (
+    id TEXT NOT NULL PRIMARY KEY,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    title TEXT NOT NULL,
+    request TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    contact_number TEXT,
+    contact_name TEXT,
+    conversation_id TEXT,
+    confirmed_fields TEXT NOT NULL,
+    deliverable TEXT,
+    due TEXT,
+    handoff_route TEXT,
+    handoff_attempt INTEGER NOT NULL DEFAULT 0,
+    work_run_id TEXT,
+    work_conversation_url TEXT,
+    result_summary TEXT,
+    verification TEXT,
+    note TEXT
+);
+
+CREATE INDEX task_contact ON task(contact_number);
+
+insertTask:
+INSERT INTO task(id, created_at, updated_at, status, title, request, kind, contact_number, contact_name,
+    conversation_id, confirmed_fields, deliverable, due, note)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+selectTask:
+SELECT * FROM task WHERE id = ?;
+
+selectAllTasks:
+SELECT * FROM task ORDER BY created_at DESC;
+
+selectTasksForContact:
+SELECT * FROM task WHERE contact_number = ? ORDER BY created_at DESC LIMIT ?;
+
+selectTasksWithStatus:
+SELECT * FROM task WHERE status IN ? ORDER BY created_at DESC;
+
+countTasksWithIdPrefix:
+SELECT count(*) FROM task WHERE id LIKE ?;
+
+setTaskStatus:
+UPDATE task SET status = ?, updated_at = ?, note = coalesce(?, note) WHERE id = ?;
+
+setTaskHandoff:
+UPDATE task SET handoff_route = ?, handoff_attempt = ?, work_run_id = ?, work_conversation_url = ?, updated_at = ?
+WHERE id = ?;
+
+setTaskResult:
+UPDATE task SET result_summary = ?, verification = ?, updated_at = ? WHERE id = ?;
+
+-- 外发动作：审批绑定内容哈希，执行只允许一次
+CREATE TABLE outbound_action (
+    id TEXT NOT NULL PRIMARY KEY,
+    task_id TEXT,
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    status TEXT NOT NULL,
+    approval_hash TEXT,
+    approved_at INTEGER,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    receipt TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+insertAction:
+INSERT INTO outbound_action(id, task_id, kind, target, content, content_hash, status, idempotency_key, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+selectAction:
+SELECT * FROM outbound_action WHERE id = ?;
+
+selectActionsForTask:
+SELECT * FROM outbound_action WHERE task_id = ? ORDER BY created_at;
+
+selectActionsWithStatus:
+SELECT * FROM outbound_action WHERE status IN ? ORDER BY created_at;
+
+approveAction:
+UPDATE outbound_action SET status = 'APPROVED', approval_hash = ?, approved_at = ?, updated_at = ? WHERE id = ?;
+
+setActionStatus:
+UPDATE outbound_action SET status = ?, receipt = coalesce(?, receipt), updated_at = ? WHERE id = ?;
+
+-- 会话（来电、短信线程、仿真）与逐句转写
+CREATE TABLE conversation (
+    id TEXT NOT NULL PRIMARY KEY,
+    channel TEXT NOT NULL,
+    number TEXT NOT NULL,
+    contact_name TEXT,
+    tier TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    mode TEXT NOT NULL,
+    outcome TEXT,
+    summary TEXT
+);
+
+insertConversation:
+INSERT INTO conversation(id, channel, number, contact_name, tier, started_at, mode) VALUES (?, ?, ?, ?, ?, ?, ?);
+
+endConversation:
+UPDATE conversation SET ended_at = ?, outcome = ?, summary = coalesce(?, summary) WHERE id = ?;
+
+selectConversation:
+SELECT * FROM conversation WHERE id = ?;
+
+selectRecentConversations:
+SELECT * FROM conversation ORDER BY started_at DESC LIMIT ?;
+
+CREATE TABLE turn (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    speaker TEXT NOT NULL,
+    text TEXT NOT NULL
+);
+
+CREATE INDEX turn_conversation ON turn(conversation_id);
+
+insertTurn:
+INSERT INTO turn(conversation_id, at, speaker, text) VALUES (?, ?, ?, ?);
+
+selectTurns:
+SELECT * FROM turn WHERE conversation_id = ? ORDER BY id;
+
+deleteTurnsBefore:
+DELETE FROM turn WHERE at < ?;
+
+-- 记忆：每条都有来源；来电方提供的先是 PENDING
+CREATE TABLE memory_fact (
+    id TEXT NOT NULL PRIMARY KEY,
+    subject TEXT NOT NULL,
+    text TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_ref TEXT,
+    status TEXT NOT NULL,
+    shareable_in_calls INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+insertFact:
+INSERT INTO memory_fact(id, subject, text, source, source_ref, status, shareable_in_calls, created_at, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+
+selectFacts:
+SELECT * FROM memory_fact ORDER BY updated_at DESC;
+
+selectFact:
+SELECT * FROM memory_fact WHERE id = ?;
+
+selectShareableFacts:
+SELECT * FROM memory_fact WHERE status = 'CONFIRMED' AND shareable_in_calls = 1 ORDER BY updated_at DESC;
+
+updateFact:
+UPDATE memory_fact SET subject = ?, text = ?, status = ?, shareable_in_calls = ?, updated_at = ? WHERE id = ?;
+
+deleteFact:
+DELETE FROM memory_fact WHERE id = ?;
+
+-- 追加式档案：哈希链
+CREATE TABLE archive_event (
+    seq INTEGER NOT NULL PRIMARY KEY,
+    at INTEGER NOT NULL,
+    type TEXT NOT NULL,
+    ref TEXT,
+    payload TEXT NOT NULL,
+    prev_hash TEXT NOT NULL,
+    hash TEXT NOT NULL
+);
+
+insertEvent:
+INSERT INTO archive_event(seq, at, type, ref, payload, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?);
+
+lastEvent:
+SELECT * FROM archive_event ORDER BY seq DESC LIMIT 1;
+
+selectEvents:
+SELECT * FROM archive_event ORDER BY seq;
+
+selectEventsForRef:
+SELECT * FROM archive_event WHERE ref = ? ORDER BY seq;
+
+selectRecentEvents:
+SELECT * FROM archive_event ORDER BY seq DESC LIMIT ?;
+
+-- 同意账本
+CREATE TABLE consent (
+    kind TEXT NOT NULL PRIMARY KEY,
+    granted INTEGER NOT NULL,
+    scope TEXT,
+    changed_at INTEGER NOT NULL
+);
+
+upsertConsent:
+INSERT OR REPLACE INTO consent(kind, granted, scope, changed_at) VALUES (?, ?, ?, ?);
+
+selectConsent:
+SELECT * FROM consent WHERE kind = ?;
+
+selectConsents:
+SELECT * FROM consent;
+
+-- 键值设置：规则、主人资料、供应商选择（密钥不放这里）
+CREATE TABLE setting (
+    key TEXT NOT NULL PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+putSetting:
+INSERT OR REPLACE INTO setting(key, value) VALUES (?, ?);
+
+getSetting:
+SELECT value FROM setting WHERE key = ?;
+
+-- 短信代办会话窗口
+CREATE TABLE sms_session (
+    number TEXT NOT NULL PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    opened_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    replies INTEGER NOT NULL DEFAULT 0,
+    closed INTEGER NOT NULL DEFAULT 0
+);
+
+upsertSmsSession:
+INSERT OR REPLACE INTO sms_session(number, conversation_id, opened_at, expires_at, replies, closed) VALUES (?, ?, ?, ?, 0, 0);
+
+selectSmsSession:
+SELECT * FROM sms_session WHERE number = ?;
+
+incrementSmsReplies:
+UPDATE sms_session SET replies = replies + 1 WHERE number = ?;
+
+closeSmsSession:
+UPDATE sms_session SET closed = 1 WHERE number = ?;
+
+-- 计数器（外呼每日上限等）
+CREATE TABLE counter (
+    day TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value INTEGER NOT NULL,
+    PRIMARY KEY (day, key)
+);
+
+-- Android 10 自带 SQLite 3.22，不支持 UPSERT，所以分两步
+initCounter:
+INSERT OR IGNORE INTO counter(day, key, value) VALUES (?, ?, 0);
+
+incrementCounter:
+UPDATE counter SET value = value + 1 WHERE day = ? AND key = ?;
+
+getCounter:
+SELECT value FROM counter WHERE day = ? AND key = ?;
