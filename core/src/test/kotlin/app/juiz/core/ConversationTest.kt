@@ -177,6 +177,21 @@ class ConversationTest {
     }
 
     @Test
+    fun toolCallWrittenAsJsonTextIsExecutedNotSpoken(): Unit = runBlocking {
+        // 音频测试台实测：小模型把 take_message 的参数当台词说了出来（"```json" "\"summary\": ……"）
+        val (core, _) = testCore()
+        val model = ScriptedChatModel.sequence(
+            ScriptedReply("好的，小王的请求已记录。\n```json\n{\"summary\": \"市场部小王请林夏做季度复盘 PPT\", \"callback_requested\": false, \"urgency\": \"normal\"}\n```\n"),
+            ScriptedReply("您的要求我会转告本人。"),
+        )
+        val engine = core.conversations.start(CallerInfo("13822224444", "小王"), Channel.VOICE, "test", model)
+        val out = turn(engine, "想请林夏帮我做一份季度复盘的PPT")
+        val said = out.filterIsInstance<EngineOutput.Speech>().joinToString("|") { it.text }
+        assertFalse("summary" in said || "```" in said || "{" in said, said)
+        assertEquals("市场部小王请林夏做季度复盘 PPT", out.filterIsInstance<EngineOutput.MessageTaken>().single().summary)
+    }
+
+    @Test
     fun taskClaimPhrasingsAreDetected() {
         val g = app.juiz.core.conversation.ClaimGuard
         listOf("已受理重做报表任务并登记邮箱与时间要求。", "我为您提交了该请办任务。", "好的，任务已确认创建，我会转交给本人后续处理。", "任务已记录为“撰写邀请函”。")

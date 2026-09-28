@@ -66,8 +66,13 @@ object Honorifics {
     /** 还会把工具名、参数名放在括号里念出来，例如"（take_message）""（取 callback_requested 信息）"。 */
     private val toolNotes = Regex("[（(][^（）()]{0,20}[A-Za-z]+_[A-Za-z_]+[^（）()]{0,20}[）)]")
 
+    /** 小模型有时把工具参数写成 JSON 文本（"```json" "\"summary\": ……"），这些不能念出来。 */
+    private val codeLike = Regex("(```|^\\s*[{}\\[\\]]|^\\s*[\"“][A-Za-z_]+[\"”]\\s*[:：])")
+    fun isCodeLike(text: String): Boolean = codeLike.containsMatchIn(text.trim())
+
     fun strip(text: String, ownerName: String): String {
-        var t = text.replace("**", "").replace(tags, "").replace(metaNotes, "").replace(toolNotes, "").replace(Regex("\\s{2,}"), " ").trim()
+        var t = text.replace("**", "").replace(tags, "").replace(metaNotes, "").replace(toolNotes, "")
+            .replace(Regex("(女士/先生|先生/女士|先生或女士|女士或先生)"), "").replace(Regex("\\s{2,}"), " ").trim()
         if (ownerName.isBlank() || ownerName == "机主") return t
         for (title in titles) {
             t = t.replace(ownerName + title, ownerName)
@@ -141,7 +146,7 @@ class ConversationEngine(
         var verifiedDone = false
         suspend fun say(raw: String, spoken: StringBuilder) {
             val cleaned = Honorifics.strip(raw, context.ownerName)
-            if (cleaned.isBlank() || cleaned.all { !it.isLetterOrDigit() }) return
+            if (cleaned.isBlank() || cleaned.all { !it.isLetterOrDigit() } || Honorifics.isCodeLike(cleaned)) return
             val blocked = ClaimGuard.check(cleaned, sentOk, verifiedDone, taskOk = context.tasksCreated > 0, noteOk = context.messagesTaken > 0)
             if (blocked != null) {
                 executor.recordBlockedClaim(context, cleaned)
@@ -153,12 +158,13 @@ class ConversationEngine(
         }
         while (true) {
             val chunker = SentenceChunker()
+            val rawText = StringBuilder()
             val spoken = StringBuilder()
             val calls = mutableListOf<ChatItem.ToolCall>()
             try {
                 model.stream(ChatRequest(systemPrompt, history.toList(), tools)).collect { ev ->
                     when (ev) {
-                        is ChatEvent.TextDelta -> for (raw in chunker.push(ev.text)) say(raw, spoken)
+                        is ChatEvent.TextDelta -> { rawText.append(ev.text); for (raw in chunker.push(ev.text)) say(raw, spoken) }
                         is ChatEvent.ToolCallDone -> calls += ChatItem.ToolCall(ev.callId, ev.name, ev.arguments)
                         is ChatEvent.Completed -> Unit
                     }
@@ -187,6 +193,8 @@ class ConversationEngine(
                 context.confirmations.observeAssistantUtterance(text)
                 for (s in context.escalation.inspectAssistant(text)) emit(EngineOutput.Escalation(s))
             }
+            // 模型把工具调用写成了文本：认得出来的（留言、建任务）照样执行，闸门照常生效
+            if (calls.isEmpty()) toolCallFromText(rawText.toString())?.let { calls += it }
             if (calls.isEmpty()) return
 
             for (c in calls) {
@@ -280,6 +288,19 @@ class ConversationEngine(
         executor.recordRescue(context, (if (fromModel) "" else "fallback ") + if (outcome.ok) "created" else "rejected: ${outcome.output.take(120)}")
         emit(EngineOutput.ToolActivity(call.name, outcome.ok, outcome.output))
         outcome.effects.filterIsInstance<ToolEffect.TaskCreated>().forEach { emit(EngineOutput.TaskCreated(it.task)) }
+    }
+
+    private fun toolCallFromText(raw: String): ChatItem.ToolCall? {
+        val i = raw.indexOf('{'); val j = raw.lastIndexOf('}')
+        if (i < 0 || j <= i) return null
+        val obj = runCatching { app.juiz.core.util.JuizJson.parseToJsonElement(raw.substring(i, j + 1)).jsonObject }.getOrNull() ?: return null
+        val name = when {
+            "title" in obj && "request" in obj -> Tools.CREATE_TASK
+            "summary" in obj -> Tools.TAKE_MESSAGE
+            else -> return null
+        }
+        if (tools.none { it.name == name }) return null
+        return ChatItem.ToolCall("text_${history.size}", name, obj.toString())
     }
 
     /** 用对方原话建任务时的标题：去掉"我是王总。"这类自我介绍，取第一个分句。 */

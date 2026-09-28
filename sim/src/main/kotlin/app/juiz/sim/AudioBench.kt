@@ -477,6 +477,7 @@ object AudioBench {
         val lineStarts = mutableListOf<Long>()
         // 通话录音：和应用里一样挂在音频端口上（左声道对方、右声道 Juiz），结束后分声道转写核对
         val recorder = app.juiz.core.recording.CallRecorder(File(out, "rec-tmp"), RATE)
+        val recStartMs = System.currentTimeMillis()
         val session = VoiceSession(app.juiz.core.recording.RecordingAudioPort(call, recorder), stt, tts, engine, null, object : VoiceSessionListener {
             override fun onState(state: VoiceState) { states.trySend(state) }
             override fun onOutput(output: EngineOutput) { outputs += output }
@@ -486,7 +487,8 @@ object AudioBench {
             override fun onLatency(firstAudioMs: Long) { firstAudio += firstAudioMs }
         }, VoiceConfig(stillThereAfterMs = 60_000, maxDurationMs = 180_000))
         val greeting = Disclosure.greeting(core.settings.ownerProfile(), false, false)
-        val result = async { session.run(greeting) }
+        var sessionEndedAt: Long? = null
+        val result = async { session.run(greeting).also { sessionEndedAt = System.currentTimeMillis() } }
         suspend fun waitFor(target: VoiceState, timeoutMs: Long) = withTimeoutOrNull(timeoutMs) { while (true) { if (states.receive() == target) break } }
         // 先清掉之前积压的状态，再等 Juiz 真正说完这一轮（说话 → 回到聆听）
         suspend fun waitReply(timeoutMs: Long) {
@@ -522,6 +524,7 @@ object AudioBench {
             session.remoteHangup()
             withTimeoutOrNull(10_000) { result.await() }
         }
+        val endMs = sessionEndedAt ?: System.currentTimeMillis()
         val refs = say.map { (JuizJson.decodeFromString(Spec.serializer(), File("tools/audio-bench/testset.json").readText()).lines.first { l -> l.id == it }).text }
         refs.forEachIndexed { i, r ->
             val lo = lineStarts.getOrNull(i) ?: return@forEachIndexed
@@ -544,19 +547,40 @@ object AudioBench {
             fun asr(pcm: ShortArray): String = slowClient.newCall(
                 Request.Builder().url("$url/asr").post(wavBytes(app.juiz.core.voice.resampleOnce(pcm, RATE, 24_000), 24_000).toRequestBody(WAV)).build(),
             ).execute().use { JuizJson.parseToJsonElement(it.body!!.string()).jsonObject["text"]?.jsonPrimitive?.content.orEmpty() }
-            val heardL = asr(left)
-            val heardR = asr(right)
+            // 一整条声道大半是静音，一次送进去转写容易半路停；按有声段切开逐段转写
+            fun segments(ch: ShortArray): List<IntRange> {
+                val hop = RATE / 10
+                val loud = (0 until ch.size / hop).map { i -> Math.sqrt((0 until hop).sumOf { k -> ch[i * hop + k].toDouble().let { it * it } } / hop) > 300 }
+                val out = mutableListOf<IntRange>(); var st = -1; var quiet = 0
+                loud.forEachIndexed { i, l ->
+                    if (l) { if (st < 0) st = i; quiet = 0 } else if (st >= 0 && ++quiet > 8) { out += (st * hop) until ((i - quiet + 3) * hop).coerceAtMost(ch.size); st = -1; quiet = 0 }
+                }
+                if (st >= 0) out += (st * hop) until ch.size
+                return out
+            }
+            fun asrChannel(ch: ShortArray) = segments(ch).joinToString("") { r -> asr(ch.copyOfRange(r.first, r.last + 1)) }
+            val heardL = asrChannel(left)
+            val heardR = asrChannel(right)
             val juizSaid = greeting + outputs.filterIsInstance<EngineOutput.Speech>().joinToString("") { it.text }
             val cl = cer(refs.joinToString(""), heardL)
             val cr = cer(juizSaid, heardR)
             println("  ${Ansi.dim("录音 左")} ${heardL.take(60)}  ${Ansi.dim("CER %.1f%%".format(cl * 100))}")
             println("  ${Ansi.dim("录音 右")} ${heardR.take(60)}  ${Ansi.dim("CER %.1f%%".format(cr * 100))}")
             checks += Check("录音", "$name 左声道是对方的原话（字错率 ≤ 20%）", cl <= 0.20, "%.1f%%".format(cl * 100))
-            // 打断的场景里，Juiz 被打断的那半句没播出去、也不该出现在录音里，所以右声道和"她打算说的"对不齐，放宽
-            val limit = if (bargeIn) 0.45 else 0.25
-            checks += Check("录音", "$name 右声道是 Juiz 实际说出的话（字错率 ≤ ${(limit * 100).toInt()}%）", cr <= limit, "%.1f%%".format(cr * 100))
-            checks += Check("录音", "$name 录音时长与通话一致（差 ≤ 3 秒）", kotlin.math.abs(n.toDouble() / RATE - timeline.pcm().size.toDouble() / RATE) <= 3.0,
-                "%.1f 秒 / 通话 %.1f 秒".format(n.toDouble() / RATE, timeline.pcm().size.toDouble() / RATE))
+            if (!bargeIn) {
+                checks += Check("录音", "$name 右声道是 Juiz 实际说出的话（字错率 ≤ 25%）", cr <= 0.25, "%.1f%%".format(cr * 100))
+            } else {
+                // 被打断的那半句没播出去、也不该出现在录音里，和"她打算说的"对不齐；这里只核对开场白确实录进了右声道
+                val cg = cer(greeting, heardR.take(greeting.length + 6))
+                checks += Check("录音", "$name 右声道录到了 Juiz 的开场白（字错率 ≤ 25%）", cg <= 0.25, "%.1f%%".format(cg * 100))
+            }
+            // 时间对齐：对方每一句在录音里出现的位置，要和它真实开口的时刻对得上（±1.5 秒）
+            val onsets = segments(left).map { it.first.toDouble() / RATE }
+            // Juiz 已经挂断之后对方才说的话本来就不在录音里
+            val misplaced = lineStarts.filter { it < endMs }.map { (it - recStartMs) / 1000.0 }.filter { t -> onsets.none { kotlin.math.abs(it - t) <= 1.5 } }
+            checks += Check("录音", "$name 对方每句话在录音里的位置与真实时间一致（±1.5 秒）", misplaced.isEmpty(),
+                if (misplaced.isEmpty()) "${lineStarts.count { it < endMs }} 句都对上" else "对不上：" + misplaced.joinToString { "%.1f 秒".format(it) })
         }
+
     }
 }
