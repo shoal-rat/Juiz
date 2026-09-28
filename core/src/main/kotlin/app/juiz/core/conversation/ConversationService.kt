@@ -70,6 +70,17 @@ class ConversationService(
         return ConversationEngine(model, executor, ctx, prompt, recorderFor(id))
     }
 
+    /** 继续一个已有会话（短信代办窗口内的后续往来）。 */
+    fun resume(conversationId: String, caller: CallerInfo, channel: Channel, model: ChatModel): ConversationEngine {
+        val grant = if (caller.tier == app.juiz.core.model.ContactTier.SPAM) null else errands?.activeGrant(caller.number)
+        val files = grant != null && errands!!.canSendFiles(grant)
+        val ctx = ConversationContext(conversationId, caller, channel, grant, files)
+        val prompt = PromptBuilder.system(settings.ownerProfile(), caller, channel, memory.shareableInCalls(), grant, files)
+        return ConversationEngine(model, executor, ctx, prompt, recorderFor(conversationId)).also { engine ->
+            engine.seed(turns(conversationId).map { it.speaker to it.text })
+        }
+    }
+
     fun recorderFor(conversationId: String) = TurnRecorder { speaker, text ->
         val now = clock.millis()
         if (consents.isGranted(ConsentKind.TRANSCRIPT_RETENTION)) q.insertTurn(conversationId, now, speaker, text)

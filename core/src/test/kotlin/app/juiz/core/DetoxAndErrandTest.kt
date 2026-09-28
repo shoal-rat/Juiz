@@ -39,7 +39,7 @@ class DetoxAndErrandTest {
         assertTrue("Q3 报表" in l.calm && "财务系统" in l.calm, l.calm)
         assertEquals(3, l.intensity)
         assertTrue(l.filteredCount >= 2)
-        assertTrue(l.deadline!!.startsWith("明天"), l.deadline)
+        assertEquals("明天上午十点前", l.deadline)
     }
 
     @Test

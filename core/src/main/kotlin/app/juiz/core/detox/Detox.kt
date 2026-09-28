@@ -48,32 +48,40 @@ object LexiconFilter {
         Regex("能不能(长点心|用点心)[？?！!。]*"),
     )
 
-    private val deadlineRe = Regex("(今天|今晚|明天|明早|明晚|后天|下周[一二三四五六日天]?|周[一二三四五六日天]|星期[一二三四五六日天]|\\d{1,2}[月/.-]\\d{1,2}[日号]?|\\d{1,2}[点:：]\\d{0,2}|[一二三四五六七八九十]+点)[^，。！？!?,]{0,8}?(前|之前|以前|下班前|上班前|为止)?")
+    private val deadlineRe = Regex(
+        "(今天|今晚|明天|明早|明晚|后天|下周[一二三四五六日天]?|周[一二三四五六日天]|星期[一二三四五六日天]|\\d{1,2}月\\d{1,2}[日号])" +
+            "(上午|下午|晚上|早上|中午|凌晨)?" +
+            "([零一二两三四五六七八九十\\d]{1,3}[点:：]([半一二三四五六七八九十\\d]{0,3}分?)?)?" +
+            "(之前|以前|前|下班前|为止)?",
+    )
 
+    private val clauseSplit = Regex("(?<=[，。！？!?,；;\\n])")
+
+    /**
+     * 按分句过滤：含辱骂或纯情绪宣泄的分句整句剔除（避免留下"你是吗"这种残片），
+     * 其余分句保留原意，感叹号改成句号。
+     */
     fun filter(text: String): DetoxLine {
-        var t = text
         var count = 0
-        for (w in insults.sortedByDescending { it.length }) {
-            if (w in t) {
-                count += Regex(Regex.escape(w)).findAll(t).count()
-                t = t.replace(w, "")
+        val kept = mutableListOf<String>()
+        for (clause in text.split(clauseSplit)) {
+            if (clause.isBlank()) continue
+            val insultHits = insults.count { it in clause }
+            val ventHits = venting.count { it.containsMatchIn(clause) }
+            if (insultHits + ventHits > 0) {
+                count += insultHits + ventHits
+                continue
             }
-        }
-        for (r in venting) {
-            val n = r.findAll(t).count()
-            if (n > 0) {
-                count += n
-                t = r.replace(t, "")
-            }
+            kept += clause
         }
         val exclaims = text.count { it == '！' || it == '!' }
-        val calm = t.replace(Regex("[！!]+"), "。")
+        val calm = kept.joinToString("").trim()
+            .replace(Regex("[！!]+"), "。")
             .replace(Regex("[？?]{2,}"), "？")
-            .replace(Regex("^[，。、\\s]+"), "")
-            .replace(Regex("([，。、])\\s*[，。、]+"), "$1")
-            .trim()
+            .replace(Regex("^[，。、,\\s]+"), "")
+            .replace(Regex("[，,]$"), "。")
         val intensity = when {
-            count >= 2 || insults.any { it in text } -> 3
+            insults.any { it in text } || count >= 2 -> 3
             count == 1 || exclaims >= 3 -> 2
             exclaims >= 1 -> 1
             else -> 0

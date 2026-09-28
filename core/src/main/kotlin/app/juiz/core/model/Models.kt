@@ -145,10 +145,10 @@ data class OwnerProfile(
     val ownerName: String = "主人",
     val assistantName: String = "Juiz",
     /** 开场白模板，{owner} {assistant} 会被替换。必须包含 AI 身份披露。 */
-    val greetingTemplate: String = "您好，我是{owner}的 AI 助理{assistant}，经本人授权代接电话。请问有什么可以帮您？",
+    val greetingTemplate: String = "您好，我是{owner}的 AI 助理 {assistant}，经本人授权代接电话。请问有什么可以帮您？",
     /** 主人允许 AI 对外说明的当前状态，例如"今天下午在开会，大约五点后方便"。 */
     val publicStatus: String = "",
     /** 通话中 AI 可以提到的主人背景（例如职业、公司），由主人自己填写。 */
     val publicBio: String = "",
-    val smsGreetingTemplate: String = "您好，我是{owner}的 AI 助理{assistant}。{owner}现在不方便接听，请直接回复短信说明来意，我会整理后转告。",
+    val smsGreetingTemplate: String = "您好，我是{owner}的 AI 助理 {assistant}。{owner}现在不方便接听，请直接回复短信说明来意，我会整理后转告。",
 )

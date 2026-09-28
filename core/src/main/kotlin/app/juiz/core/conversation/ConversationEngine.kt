@@ -37,6 +37,13 @@ class ConversationEngine(
 
     val transcript: List<ChatItem> get() = history.toList()
 
+    /** 恢复会话（例如短信窗口里应用进程被回收后）：把已留存的往来放回历史，不重复记录。 */
+    fun seed(turns: List<Pair<String, String>>) {
+        for ((speaker, text) in turns) {
+            history += if (speaker == "caller") ChatItem.User(PromptBuilder.wrapCaller(text)) else ChatItem.Assistant(text)
+        }
+    }
+
     /** 开场白由模板生成（不经模型），这里只把它记入历史。 */
     fun opening(greeting: String): List<EngineOutput> {
         history += ChatItem.Assistant(greeting)
